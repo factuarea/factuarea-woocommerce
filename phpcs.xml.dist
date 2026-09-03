@@ -1,0 +1,83 @@
+<?xml version="1.0"?>
+<ruleset name="Factuarea for WooCommerce">
+	<description>WordPress and WooCommerce coding standards for the Factuarea for WooCommerce plugin.</description>
+
+	<!--
+	Scope. Only the code that ships or that verifies what ships is inspected,
+	named one path at a time and never by a wildcard over the repository root:
+	a wildcard would silently start covering whatever directory somebody adds
+	next, and the first thing it would cover is `vendor/`.
+
+	The two plugin root files are declared here even though a later phase
+	writes them. phpcs stops with "the file does not exist" when a declared
+	path is missing, and that is the intended behaviour: they are part of the
+	contract of this package, not optional extras.
+	-->
+	<file>src</file>
+	<file>scripts</file>
+	<file>factuarea-for-woocommerce.php</file>
+	<file>uninstall.php</file>
+
+	<exclude-pattern>*/vendor/*</exclude-pattern>
+	<exclude-pattern>*/node_modules/*</exclude-pattern>
+	<exclude-pattern>*/dist/*</exclude-pattern>
+
+	<!-- Show sniff codes and progress; fail the run on warnings too. -->
+	<arg name="basepath" value="."/>
+	<arg name="colors"/>
+	<arg name="extensions" value="php"/>
+	<arg name="parallel" value="8"/>
+	<arg value="sp"/>
+	<config name="ignore_warnings_on_exit" value="0"/>
+	<config name="ignore_errors_on_exit" value="0"/>
+
+	<!--
+	Minimum PHP version, declared once and consumed by PHPCompatibility through
+	the WooCommerce standard. It has to match `require.php` in composer.json and
+	the `Requires PHP` header of the plugin: three places that say different
+	numbers is how a plugin ends up fatally erroring on the one installation
+	that believed the lowest of them.
+	-->
+	<config name="testVersion" value="8.1-"/>
+
+	<!-- Minimum WordPress version the plugin announces. -->
+	<config name="minimum_wp_version" value="6.5"/>
+
+	<rule ref="WordPress"/>
+	<rule ref="WooCommerce-Core"/>
+
+	<rule ref="WordPress.WP.I18n">
+		<properties>
+			<property name="text_domain" type="array">
+				<element value="factuarea-for-woocommerce"/>
+			</property>
+		</properties>
+	</rule>
+
+	<rule ref="WordPress.NamingConventions.PrefixAllGlobals">
+		<properties>
+			<property name="prefixes" type="array">
+				<element value="factuarea"/>
+				<element value="FACTUAREA"/>
+				<element value="Factuarea\WooCommerce"/>
+			</property>
+		</properties>
+	</rule>
+
+	<!--
+	The one WordPress rule this package does not follow, with its reason.
+
+	`WordPress.Files.FileName` asks for `class-my-thing.php` in lowercase with
+	hyphens. This plugin autoloads its classes with PSR-4 under the
+	`Factuarea\WooCommerce\` namespace, which requires the file to be named
+	exactly like the class. The two rules cannot both hold, and PSR-4 is the one
+	that the composer manifest, the phpunit suites and every `use` statement
+	already depend on. Nothing else in the WordPress standard is switched off:
+	an exclusion without a written reason is how a standard stops meaning
+	anything.
+	-->
+	<rule ref="WordPress.Files.FileName">
+		<exclude-pattern>src/*</exclude-pattern>
+		<exclude-pattern>tests/*</exclude-pattern>
+	</rule>
+</ruleset>

@@ -1,0 +1,73 @@
+{
+    "name": "factuarea/factuarea-for-woocommerce",
+    "description": "Factuarea for WooCommerce - captures the buyer tax identifier at checkout and delivers paid orders and refunds to Factuarea with its own outbox, backoff and idempotency.",
+    "type": "wordpress-plugin",
+    "license": "GPL-2.0-or-later",
+    "keywords": [
+        "wordpress",
+        "woocommerce",
+        "invoicing",
+        "factuarea",
+        "verifactu"
+    ],
+    "homepage": "https://github.com/factuarea/factuarea-woocommerce",
+    "authors": [
+        {
+            "name": "Factuarea",
+            "email": "info@factuarea.com",
+            "homepage": "https://factuarea.com"
+        }
+    ],
+    "support": {
+        "issues": "https://github.com/factuarea/factuarea-woocommerce/issues"
+    },
+    "require": {
+        "php": ">=8.1"
+    },
+    "require-dev": {
+        "phpunit/phpunit": "^10.5",
+        "woocommerce/woocommerce-sniffs": "^1.0",
+        "brain/monkey": "^2.6"
+    },
+    "autoload": {
+        "psr-4": {
+            "Factuarea\\WooCommerce\\": "src/"
+        }
+    },
+    "autoload-dev": {
+        "psr-4": {
+            "Factuarea\\WooCommerce\\Tests\\": "tests/"
+        }
+    },
+    "config": {
+        "allow-plugins": {
+            "dealerdirect/phpcodesniffer-composer-installer": true
+        },
+        "sort-packages": true,
+        "optimize-autoloader": true
+    },
+    "minimum-stability": "stable",
+    "prefer-stable": true,
+    "scripts": {
+        "test": "phpunit",
+        "lint:phpcs": "phpcs",
+        "lint:english": "php scripts/check-english.php src scripts readme.txt README.md docs",
+        "lint:no-paywall": "php scripts/check-no-paywall.php",
+        "package": "rm -rf dist && mkdir -p dist/factuarea-for-woocommerce && rsync -a --exclude-from=.distignore --exclude='.git/' --exclude='dist/' ./ dist/factuarea-for-woocommerce/ && cd dist && zip -rq factuarea-for-woocommerce.zip factuarea-for-woocommerce",
+        "verify": [
+            "@test",
+            "@lint:phpcs",
+            "@lint:english",
+            "@lint:no-paywall",
+            "@package"
+        ]
+    },
+    "scripts-descriptions": {
+        "test": "Runs the PHPUnit suites (Unit without a database, Integration against the containerised WordPress database).",
+        "lint:phpcs": "Runs the WordPress and WooCommerce coding standards over src/, scripts/ and the two plugin root files.",
+        "lint:english": "Fails when a user-facing string of the package is written in Spanish.",
+        "lint:no-paywall": "Fails when a feature of the plugin is gated behind a payment, a licence or a plan upgrade, and checks the licence file and the packaged artefact.",
+        "package": "Builds dist/factuarea-for-woocommerce.zip exactly as it would be published, honouring .distignore.",
+        "verify": "Runs test, lint:phpcs, lint:english, lint:no-paywall and package, in that order."
+    }
+}

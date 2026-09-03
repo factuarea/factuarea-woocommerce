@@ -1,0 +1,61 @@
+# What NEVER travels inside the published artefact.
+#
+# One pattern per line; blank lines and lines starting with '#' are ignored.
+# The list is consumed by the `package` script in composer.json
+# (rsync --exclude-from), and by the packaging check of the no-paywall gate.
+#
+# The artefact carries the plugin and its licence, and nothing else:
+#
+#   factuarea-for-woocommerce.php   the plugin entry point
+#   uninstall.php                   the uninstall routine WordPress looks for
+#   src/                            the plugin code
+#   languages/                      the translation catalogue, when it exists
+#   LICENSE                         the GPL text the directory requires
+#   readme.txt                      the directory listing
+#   README.md                       the human-readable overview
+#
+# Note for the wiring phase: `vendor/` is excluded because this plugin declares
+# NO runtime dependency, so the only thing composer installs is developer
+# tooling. The plugin therefore registers its own PSR-4 autoloader for the
+# `Factuarea\WooCommerce\` namespace instead of requiring `vendor/autoload.php`.
+# Shipping a `vendor/` directory would put a second copy of somebody else's
+# library inside a WordPress process that may already have loaded another one.
+
+# Version control and repository metadata.
+.git
+.gitignore
+.gitattributes
+.github
+
+# Development configuration that means nothing to a merchant.
+.distignore
+.editorconfig
+.wp-env.json
+.wp-env.override.json
+composer.json
+composer.lock
+package.json
+package-lock.json
+phpcs.xml.dist
+phpunit.xml.dist
+playwright.config.js
+
+# Everything that exists to verify the plugin rather than to run it.
+tests
+scripts
+docs
+
+# Build output and installed dependencies.
+vendor
+node_modules
+dist
+test-results
+playwright-report
+*.zip
+
+# Editor and operating system noise.
+.phpunit.result.cache
+.phpunit.cache
+.idea
+.vscode
+.DS_Store

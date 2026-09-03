@@ -1,0 +1,12 @@
+vendor/
+node_modules/
+dist/
+*.zip
+
+# Local tool state that is machine-specific and never belongs in a commit.
+.phpunit.result.cache
+.phpunit.cache/
+/test-results/
+/playwright-report/
+.wp-env.override.json
+.DS_Store

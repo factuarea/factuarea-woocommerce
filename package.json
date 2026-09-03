@@ -1,0 +1,17 @@
+{
+  "name": "factuarea-for-woocommerce-e2e",
+  "version": "0.1.0",
+  "private": true,
+  "description": "End-to-end harness for the Factuarea for WooCommerce plugin. Nothing here is shipped: the published artefact is PHP only.",
+  "license": "GPL-2.0-or-later",
+  "scripts": {
+    "e2e:up": "wp-env start",
+    "e2e:down": "wp-env stop",
+    "e2e": "playwright test"
+  },
+  "dependencies": {},
+  "devDependencies": {
+    "@playwright/test": "^1.50.0",
+    "@wordpress/env": "^10.0.0"
+  }
+}

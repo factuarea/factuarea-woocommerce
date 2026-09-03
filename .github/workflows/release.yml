@@ -1,0 +1,154 @@
+name: Release
+
+# Release pipeline for factuarea-for-woocommerce.
+#
+# Flow:
+#   1. Bump `Version:` in factuarea-for-woocommerce.php and `Stable tag:` in
+#      readme.txt, add the changelog entry, merge.
+#   2. Push the tag `v<version>`. This workflow refuses to go on unless the tag,
+#      the plugin header and readme.txt name the same version, runs the whole
+#      `composer verify` script, builds the artefact and attaches it to the
+#      GitHub release.
+#
+# WHAT THIS WORKFLOW DOES NOT DO, ON PURPOSE: it does not upload anything to the
+# WordPress plugin directory. That upload is SVN, it is performed by a person,
+# and the credential that can write to the directory is not a credential a
+# workflow holds. The runbook is docs/publishing.md, section 4.3, and the
+# artefact this workflow attaches to the release is exactly the file that step
+# asks for - so the manual step is a copy, never a rebuild from a working tree
+# nobody verified.
+#
+# Third-party actions are pinned by commit and never by tag, for the reason
+# written at the top of ci.yml.
+
+on:
+  push:
+    tags: ['v*']
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: write # creating the release and attaching the artefact to it
+
+jobs:
+  release:
+    name: Release
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+
+      - name: Check the tag against the plugin header and readme.txt
+        # BEFORE ANY WORK AT ALL, and before anything is built, because these
+        # three numbers disagreeing is the one release defect that cannot be
+        # fixed by shipping again.
+        #
+        # `Stable tag` is what the plugin directory SERVES: it points at the tag
+        # people download, and pointing it at a version that was never uploaded
+        # takes the plugin offline rather than serving the previous one. A plugin
+        # header behind the tag is the mirror failure: WordPress offers every
+        # shop an update that installs the same code they already have, and
+        # keeps offering it.
+        #
+        # Read with sed from the raw files rather than with a WordPress function,
+        # because there is no WordPress here - and the plugin header is a comment
+        # anyway, which is exactly how the no-paywall gate reads the licence out
+        # of the same block.
+        id: version
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          header="$(sed -n 's/^[[:space:]]*\*[[:space:]]*Version:[[:space:]]*\(.*\)$/\1/p' factuarea-for-woocommerce.php | head -n 1 | tr -d '[:space:]')"
+          readme="$(sed -n 's/^Stable tag:[[:space:]]*\(.*\)$/\1/p' readme.txt | head -n 1 | tr -d '[:space:]')"
+
+          if [ -z "$header" ]; then
+            echo "::error::factuarea-for-woocommerce.php declares no Version: header. Nothing was built."
+            exit 1
+          fi
+
+          if [ -z "$readme" ]; then
+            echo "::error::readme.txt declares no Stable tag. Nothing was built."
+            exit 1
+          fi
+
+          if [ "$tag" != "$header" ] || [ "$tag" != "$readme" ]; then
+            echo "::error::Tag ${GITHUB_REF_NAME} carries version '${tag}', the plugin header declares '${header}' and readme.txt declares '${readme}'. All three have to agree. Fix them, delete the tag and push it again; nothing was built and nothing was released."
+            exit 1
+          fi
+
+          echo "Tag, plugin header and readme.txt all agree on ${tag}."
+          echo "version=${tag}" >> "$GITHUB_OUTPUT"
+
+      - uses: shivammathur/setup-php@f3e473d116dcccaddc5834248c87452386958240 # 2.37.2
+        with:
+          # One known runtime for the build. The supported range is what the CI
+          # matrix is for, and the artefact this produces is the same bytes on
+          # any of them: `composer package` copies files, it does not compile.
+          php-version: '8.1'
+          coverage: none
+          tools: composer:v2
+
+      - name: Install dependencies
+        # Same shape and the same reason as ci.yml.
+        run: |
+          if [ -f composer.lock ]; then
+            echo "composer.lock is present: installing exactly what it pins."
+            composer install --no-interaction --no-progress --prefer-dist
+          else
+            echo "::notice::No composer.lock in the repository, so development dependencies are resolved fresh. Nothing composer installs reaches the published artefact."
+            composer update --no-interaction --no-progress --prefer-dist
+          fi
+
+      - name: composer verify
+        # Every gate, on the exact commit the tag points at, and BEFORE the
+        # artefact is attached anywhere. `verify` ends with `package`, so the zip
+        # this release carries is the one the no-paywall gate audited in the same
+        # run rather than a later rebuild.
+        run: composer verify
+
+      - name: Check the artefact was built
+        run: |
+          if [ ! -f dist/factuarea-for-woocommerce.zip ]; then
+            echo "::error::composer verify finished but dist/factuarea-for-woocommerce.zip is not there, so there is nothing to release."
+            exit 1
+          fi
+          unzip -l dist/factuarea-for-woocommerce.zip
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: factuarea-for-woocommerce-${{ steps.version.outputs.version }}
+          path: dist/factuarea-for-woocommerce.zip
+          if-no-files-found: error
+          retention-days: 90
+
+      - name: Attach the artefact to the GitHub release
+        # The release is where the person doing the manual directory upload goes
+        # to get the file. Creating it here rather than by hand means the zip they
+        # upload is the one every gate ran against, which is the whole point of
+        # the step above.
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          notes="$(printf '%s\n' \
+            "Artefact: \`factuarea-for-woocommerce.zip\`, built from \`${GITHUB_REF_NAME}\` after \`composer verify\` passed in full." \
+            "" \
+            "Publishing to the WordPress plugin directory is a MANUAL step and is not performed by this workflow. Follow docs/publishing.md section 4.3: check out the SVN repository, replace \`trunk/\` with the contents of this artefact, copy it to \`tags/${{ steps.version.outputs.version }}/\`, confirm \`trunk/readme.txt\` says \`Stable tag: ${{ steps.version.outputs.version }}\`, and commit." )"
+
+          if gh release view "$GITHUB_REF_NAME" > /dev/null 2>&1; then
+            gh release upload "$GITHUB_REF_NAME" dist/factuarea-for-woocommerce.zip --clobber
+          else
+            gh release create "$GITHUB_REF_NAME" dist/factuarea-for-woocommerce.zip \
+              --title "$GITHUB_REF_NAME" \
+              --notes "$notes"
+          fi
+
+      - name: Say what is still to be done by a person
+        run: |
+          echo "::notice::Version ${{ steps.version.outputs.version }} is built and attached to the release. It is NOT in the WordPress plugin directory yet: that upload is manual and is described in docs/publishing.md section 4.3."
+
+      - name: Explain a failed release
+        if: failure()
+        run: |
+          echo "::error::This release did not finish, so NOTHING was published to the WordPress plugin directory - that step is manual and had not been reached."
+          echo "::error::If the version check failed, the tag, the Version: header of factuarea-for-woocommerce.php and the Stable tag of readme.txt do not all say the same thing. Fix them on main, delete the tag, and push it again."
+          echo "::error::If composer verify failed, the failing gate is in the log above. A tag is cheap to move; a version in the directory cannot be taken back."

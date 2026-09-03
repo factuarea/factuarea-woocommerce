@@ -1,0 +1,60 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<phpunit xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+		 xsi:noNamespaceSchemaLocation="vendor/phpunit/phpunit/phpunit.xsd"
+		 bootstrap="vendor/autoload.php"
+		 cacheDirectory=".phpunit.cache"
+		 colors="true"
+		 executionOrder="depends,defects"
+		 beStrictAboutOutputDuringTests="true"
+		 failOnRisky="true"
+		 failOnWarning="true"
+		 failOnNotice="true"
+		 failOnDeprecation="true"
+		 failOnEmptyTestSuite="true"
+		 displayDetailsOnTestsThatTriggerDeprecations="true"
+		 displayDetailsOnTestsThatTriggerErrors="true"
+		 displayDetailsOnTestsThatTriggerNotices="true"
+		 displayDetailsOnTestsThatTriggerWarnings="true">
+
+	<!--
+	`failOnEmptyTestSuite` is on for one reason: a suite whose directory holds no
+	test file passes, and a green run that proved nothing is worse than a red
+	one. It is the mechanical half of the closing check that the runner must
+	report more than zero tests.
+
+	The bootstrap is the composer autoloader and nothing else. Each Unit test
+	installs and removes its own doubles of the WordPress functions it needs, so
+	there is no shared global state to set up here; putting the doubles in a
+	bootstrap would make every test depend on whatever the previous one left
+	behind. The Integration suite is executed INSIDE the containerised WordPress
+	environment, where WordPress and WooCommerce are already loaded by the
+	runner, so it needs no bootstrap of its own either.
+	-->
+
+	<testsuites>
+		<!--
+		Unit: no database, no WordPress. Every WordPress function the code under
+		test calls is replaced by a double, so these run on a bare PHP with only
+		composer installed.
+		-->
+		<testsuite name="Unit">
+			<directory>tests/Unit</directory>
+		</testsuite>
+
+		<!--
+		Integration: talks to the real WordPress database of the containerised
+		environment. Kept apart from Unit because it needs that environment up,
+		and because two of these running at once on the same database destroy
+		each other.
+		-->
+		<testsuite name="Integration">
+			<directory>tests/Integration</directory>
+		</testsuite>
+	</testsuites>
+
+	<source>
+		<include>
+			<directory suffix=".php">src</directory>
+		</include>
+	</source>
+</phpunit>

@@ -1,0 +1,32 @@
+# Apache rules for the end-to-end container, and the reason they are a file in
+# this repository instead of something WordPress writes for itself.
+#
+# WordPress writes these rules into `.htaccess` when pretty permalinks are saved.
+# In the containerised environment it CANNOT: the document root belongs to root
+# inside the image, while Apache and WP-CLI both run as the host user, so every
+# attempt to create the file fails - silently, because saving a permalink
+# structure that cannot be written still stores the structure in the database.
+#
+# The result measured on the first run of this harness: WordPress reported
+# `/%postname%/` permalinks and Apache answered 404 to every path that was not a
+# real file. That takes the whole ingestion path with it - Apache never hands
+# `/api/webhooks/stores/woocommerce` to PHP, so the mock receiver never sees a
+# delivery and every delivery scenario fails with a transport error that looks
+# exactly like a plugin defect.
+#
+# So the rules are shipped and mounted. They are WordPress's own, unmodified.
+#
+# NOTHING HERE IS PUBLISHED: `.distignore` excludes the whole `tests/` tree, and
+# the plugin has no opinion about a merchant's Apache configuration.
+
+# BEGIN WordPress
+<IfModule mod_rewrite.c>
+RewriteEngine On
+RewriteRule .* - [E=HTTP_AUTHORIZATION:%{HTTP:Authorization}]
+RewriteBase /
+RewriteRule ^index\.php$ - [L]
+RewriteCond %{REQUEST_FILENAME} !-f
+RewriteCond %{REQUEST_FILENAME} !-d
+RewriteRule . /index.php [L]
+</IfModule>
+# END WordPress

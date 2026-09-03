@@ -1,0 +1,229 @@
+{
+  "id": 7412,
+  "parent_id": 0,
+  "number": "7412",
+  "order_key": "wc_order_8Qm2Tb5Yh3Vn7",
+  "created_via": "checkout",
+  "version": "9.4.3",
+  "status": "processing",
+  "currency": "EUR",
+  "date_created": "2026-08-15T11:42:05",
+  "date_created_gmt": "2026-08-15T09:42:05",
+  "date_modified": "2026-08-15T11:43:18",
+  "date_modified_gmt": "2026-08-15T09:43:18",
+  "discount_total": "0.00",
+  "discount_tax": "0.00",
+  "shipping_total": "4.95",
+  "shipping_tax": "1.04",
+  "cart_tax": "11.18",
+  "total": "84.97",
+  "total_tax": "12.22",
+  "prices_include_tax": false,
+  "customer_id": 91,
+  "customer_ip_address": "",
+  "customer_user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36",
+  "customer_note": "Necesito factura completa a nombre de la empresa.",
+  "billing": {
+    "first_name": "Comprador",
+    "last_name": "De Ejemplo",
+    "company": "Suministros Ejemplo SL",
+    "address_1": "Domicilio anonimizado",
+    "address_2": "",
+    "city": "Madrid",
+    "state": "M",
+    "postcode": "28001",
+    "country": "ES",
+    "email": "compras@empresa-ejemplo.example.com",
+    "phone": ""
+  },
+  "shipping": {
+    "first_name": "Comprador",
+    "last_name": "De Ejemplo",
+    "company": "Suministros Ejemplo SL",
+    "address_1": "Domicilio anonimizado",
+    "address_2": "",
+    "city": "Madrid",
+    "state": "M",
+    "postcode": "28001",
+    "country": "ES",
+    "phone": ""
+  },
+  "payment_method": "redsys",
+  "payment_method_title": "Tarjeta de crédito (Redsys)",
+  "transaction_id": "813204",
+  "date_paid": "2026-08-15T11:43:18",
+  "date_paid_gmt": "2026-08-15T09:43:18",
+  "date_completed": null,
+  "date_completed_gmt": null,
+  "cart_hash": "5e1c47a90b62d3f8ae04c19d7b3562fa",
+  "meta_data": [
+    {
+      "id": 90411,
+      "key": "_wc_billing/factuarea/tax-id",
+      "value": "B45712098"
+    },
+    {
+      "id": 90412,
+      "key": "_factuarea_tax_id",
+      "value": "B45712098"
+    },
+    {
+      "id": 90413,
+      "key": "is_vat_exempt",
+      "value": "no"
+    },
+    {
+      "id": 90414,
+      "key": "_new_order_email_sent",
+      "value": "true"
+    }
+  ],
+  "line_items": [
+    {
+      "id": 515,
+      "name": "Camiseta de algodón orgánico - Talla M, Azul",
+      "product_id": 118,
+      "variation_id": 121,
+      "quantity": 2,
+      "tax_class": "",
+      "subtotal": "49.80",
+      "subtotal_tax": "10.46",
+      "total": "49.80",
+      "total_tax": "10.46",
+      "taxes": [
+        {
+          "id": 21,
+          "total": "10.46",
+          "subtotal": "10.46"
+        }
+      ],
+      "meta_data": [
+        {
+          "id": 5541,
+          "key": "pa_talla",
+          "value": "m",
+          "display_key": "Talla",
+          "display_value": "M"
+        },
+        {
+          "id": 5542,
+          "key": "pa_color",
+          "value": "azul",
+          "display_key": "Color",
+          "display_value": "Azul"
+        }
+      ],
+      "sku": "CAM-ORG-M-AZUL",
+      "global_unique_id": "",
+      "price": 24.9,
+      "image": {
+        "id": 312,
+        "src": "https://tienda-ejemplo.example.com/wp-content/uploads/2026/03/camiseta-organica.jpg"
+      },
+      "parent_name": "Camiseta de algodón orgánico"
+    },
+    {
+      "id": 516,
+      "name": "Libro: Guía práctica de facturación electrónica",
+      "product_id": 134,
+      "variation_id": 0,
+      "quantity": 1,
+      "tax_class": "superreducido",
+      "subtotal": "18.00",
+      "subtotal_tax": "0.72",
+      "total": "18.00",
+      "total_tax": "0.72",
+      "taxes": [
+        {
+          "id": 22,
+          "total": "0.72",
+          "subtotal": "0.72"
+        }
+      ],
+      "meta_data": [],
+      "sku": "LIB-FACT-2026",
+      "global_unique_id": "",
+      "price": 18,
+      "image": {
+        "id": 341,
+        "src": "https://tienda-ejemplo.example.com/wp-content/uploads/2026/01/guia-facturacion.jpg"
+      },
+      "parent_name": null
+    }
+  ],
+  "tax_lines": [
+    {
+      "id": 517,
+      "rate_code": "ES-IVA-1",
+      "rate_id": 21,
+      "label": "IVA",
+      "compound": false,
+      "tax_total": "10.46",
+      "shipping_tax_total": "1.04",
+      "rate_percent": 21,
+      "meta_data": []
+    },
+    {
+      "id": 518,
+      "rate_code": "ES-IVA SUPERREDUCIDO-1",
+      "rate_id": 22,
+      "label": "IVA superreducido",
+      "compound": false,
+      "tax_total": "0.72",
+      "shipping_tax_total": "0.00",
+      "rate_percent": 4,
+      "meta_data": []
+    }
+  ],
+  "shipping_lines": [
+    {
+      "id": 519,
+      "method_title": "Envío estándar",
+      "method_id": "flat_rate",
+      "instance_id": "3",
+      "total": "4.95",
+      "total_tax": "1.04",
+      "taxes": [
+        {
+          "id": 21,
+          "total": "1.04",
+          "subtotal": ""
+        }
+      ],
+      "tax_status": "taxable",
+      "meta_data": [
+        {
+          "id": 5551,
+          "key": "Artículos",
+          "value": "Camiseta de algodón orgánico - Talla M, Azul &times; 2, Libro: Guía práctica de facturación electrónica &times; 1",
+          "display_key": "Artículos",
+          "display_value": "Camiseta de algodón orgánico - Talla M, Azul &times; 2, Libro: Guía práctica de facturación electrónica &times; 1"
+        }
+      ]
+    }
+  ],
+  "fee_lines": [],
+  "coupon_lines": [],
+  "refunds": [],
+  "payment_url": "https://tienda-ejemplo.example.com/finalizar-compra/order-pay/7412/?pay_for_order=true&key=wc_order_8Qm2Tb5Yh3Vn7",
+  "is_editable": false,
+  "needs_payment": false,
+  "needs_processing": true,
+  "_links": {
+    "self": [
+      {
+        "href": "https://tienda-ejemplo.example.com/wp-json/wc/v3/orders/7412"
+      }
+    ],
+    "collection": [
+      {
+        "href": "https://tienda-ejemplo.example.com/wp-json/wc/v3/orders"
+      }
+    ],
+    "customer": [
+      {
+        "href": "https://tienda-ejemplo.example.com/wp-json/wc/v3/customers/91"
+      }
+    ]
+  }
+}

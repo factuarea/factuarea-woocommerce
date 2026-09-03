@@ -1,0 +1,23 @@
+# Line endings and encoding are fixed here so the English-only gate compares the
+# same bytes on every machine: a file checked out with CRLF or written in a
+# non-UTF-8 encoding turns an accented character into a byte sequence the gate
+# would either miss or report at the wrong column.
+root = true
+
+[*]
+charset = utf-8
+end_of_line = lf
+insert_final_newline = true
+trim_trailing_whitespace = true
+indent_style = tab
+
+[*.{json,yml,yaml,md,txt,js,mjs,cjs}]
+indent_style = space
+indent_size = 2
+
+[*.md]
+trim_trailing_whitespace = false
+
+[LICENSE]
+insert_final_newline = false
+trim_trailing_whitespace = false

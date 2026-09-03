@@ -1,0 +1,25 @@
+{
+	"core": "https://wordpress.org/wordpress-6.5.zip",
+	"phpVersion": "8.1",
+	"plugins": [
+		"https://downloads.wordpress.org/plugin/woocommerce.8.9.5.zip",
+		"."
+	],
+	"mappings": {
+		".htaccess": "./tests/e2e/apache/htaccess",
+		"wp-content/mu-plugins": "./tests/e2e/mu-plugins",
+		"wp-content/factuarea-e2e": "./tests/e2e/seed"
+	},
+	"config": {
+		"FACTUAREA_E2E": true,
+		"WP_DEBUG": true,
+		"WP_DEBUG_LOG": true,
+		"WP_DEBUG_DISPLAY": false,
+		"SCRIPT_DEBUG": false,
+		"WP_ENVIRONMENT_TYPE": "local",
+		"DISABLE_WP_CRON": true
+	},
+	"lifecycleScripts": {
+		"afterStart": "npx wp-env run cli wp eval-file wp-content/factuarea-e2e/seed-site.php"
+	}
+}

@@ -1,0 +1,16 @@
+{
+  "_comment": "GENERATED REFERENCE - do not edit by hand. Rewritten by scripts/derive-retry-schedule.php from the single retry calculator of the backend. The parity test compares src/Contract/RetrySchedule.php against this file, interval by interval, and fails naming the one that diverges.",
+  "source": "backend/app/Webhooks/Domain/Service/RetryScheduleCalculator.php",
+  "measured_at": "2026-09-02",
+  "intervals_seconds": {
+    "1": 60,
+    "2": 300,
+    "3": 1800,
+    "4": 7200,
+    "5": 43200,
+    "6": 86400,
+    "7": 259200
+  },
+  "max_attempts": 8,
+  "jitter_ratio": 0.1
+}

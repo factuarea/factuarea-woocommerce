@@ -1,0 +1,57 @@
+{
+    "purpose": "Reference triples (body, secret, signature) for the delivery signature. They exist so that the signer of this plugin is measured against a value produced OUTSIDE it, and against the very values the receiver's own test asserts. A signer checked only against a verifier written in the same repository is checked against itself: if both made the same mistake - hexadecimal instead of base64, or hashing a re-encoded body - they would agree and the green would mean nothing.",
+    "algorithm": "base64_encode( hash_hmac( 'sha256', raw_body, secret, true ) ) - the base64 encoding of the BINARY HMAC-SHA256 digest of the raw body. Without the binary flag the digest comes back in hexadecimal and its base64 is a well-formed value that no receiver accepts.",
+    "receiver": "backend/app/Integration/Infrastructure/Provider/Adapters/WooCommerce/WooCommerceWebhookVerifier.php in the factuarea monorepo. It recomputes exactly this and compares with hash_equals over the bytes it received.",
+    "receiver_test": "backend/tests/Unit/Integration/Infrastructure/Provider/WooCommerce/WooCommerceWebhookVerifierTest.php. The first two vectors below are byte-for-byte the golden vectors that test asserts, so emitter and receiver are anchored to one shared number rather than to each other.",
+    "generated_with": {
+        "generated_on": "2026-09-02",
+        "container": "docker run --rm -v \"$PWD\":/gen -w /gen php:8.2-cli",
+        "openssl": "printf %s \"$BODY\" | openssl dgst -sha256 -hmac \"$SECRET\" -binary | base64",
+        "php": "php -r 'echo base64_encode(hash_hmac(\"sha256\", $argv[1], $argv[2], true)), \"\\n\";' \"$BODY\" \"$SECRET\"",
+        "note": "Every signature in this file was produced by BOTH commands and the two agreed. Two implementations that agree is the smallest thing that is not self-confirmation. Reproduce a single value without the generator by exporting BODY and SECRET from the vector and running the openssl line; the shell must not add a trailing newline, which is why it is printf and never echo.",
+        "regenerating": "Only ever regenerate a value together with the body or the secret it belongs to. Editing a signature on its own to make a red test pass is editing the answer key."
+    },
+    "vectors": [
+        {
+            "name": "rfc-4231-test-case-2",
+            "kind": "valid",
+            "body": "what do ya want for nothing?",
+            "secret": "Jefe",
+            "signature": "W9zBRr9gdU5qBCQmCJV1x1oAPwidJzmDnexYuWTsOEM=",
+            "published_by": "RFC 4231 section 4.3, Test Case 2 (IETF, https://www.rfc-editor.org/rfc/rfc4231.txt), which publishes the digest in hexadecimal as 5bdcc146bf60754e6a042426089575c75a003f089d2739839dec58b964ec3843.",
+            "why": "The only vector here whose expected value was published by somebody with no connection to this project. It pins the ALGORITHM: HMAC-SHA256, and the base64 of the binary digest rather than of its hexadecimal form."
+        },
+        {
+            "name": "store-order-body",
+            "kind": "valid",
+            "body": "{\"id\":727,\"status\":\"processing\",\"total\":\"49.90\",\"currency\":\"EUR\"}",
+            "secret": "secreto-de-prueba-del-cassette",
+            "signature": "Ll38XkZJFM2DT74jhvohU64CFb1evHwBxQK+xtzV+Pw=",
+            "why": "A body shaped like a store webhook. It pins what the RFC vector cannot: that the body is signed as it stands, byte for byte. A signer that decoded the JSON and re-encoded it would pass the RFC vector, which is plain text, and fail this one.",
+            "do_not_translate": "The secret is a Spanish literal and it stays that way. It is not copy and it is not a real secret: it is one half of a shared anchor, copied character for character from the receiver's test, and changing a single byte of it changes the signature and breaks the anchoring that is the entire reason this vector exists. Same for the body."
+        },
+        {
+            "name": "store-order-body-signature-altered-by-one-character",
+            "kind": "invalid",
+            "body": "{\"id\":727,\"status\":\"processing\",\"total\":\"49.90\",\"currency\":\"EUR\"}",
+            "secret": "secreto-de-prueba-del-cassette",
+            "signature": "Ml38XkZJFM2DT74jhvohU64CFb1evHwBxQK+xtzV+Pw=",
+            "correct_signature": "Ll38XkZJFM2DT74jhvohU64CFb1evHwBxQK+xtzV+Pw=",
+            "alteration": "First character, L changed to M. Nothing else differs.",
+            "why": "The negative half of the previous vector, and it has to be asserted in the same breath as the positive one. Without it, a signer that returned a constant would satisfy every valid vector taken alone; with it, the test says that this exact string is NOT what the signer produces for this body and this secret. One character is enough because the whole digest changes with any input bit, which is also why an altered signature can never be recovered by chance."
+        },
+        {
+            "name": "reserialization-sensitive-body",
+            "kind": "reserialization",
+            "raw_body": "{ \"b\" : 1 ,  \"a\" : 2 , \"note\" : \"significant spacing and a slash / as typed\" }",
+            "reserialized_body": "{\"b\":1,\"a\":2,\"note\":\"significant spacing and a slash \\/ as typed\"}",
+            "secret": "whsec_outbox_reserialization_probe",
+            "signature": "g9SkxqQ7jR3vlhAQz09XYTgRz9KUlwPO5l3fgsjd3wc=",
+            "signature_of_reserialized_body": "s6/hmjnZQZY0t/B0fYk0FOT2XV/SKY+yng/SiieboB0=",
+            "reserialized_with": "json_encode( json_decode( raw_body, true, 512, JSON_THROW_ON_ERROR ), JSON_THROW_ON_ERROR )",
+            "differs_in": "Three ways, and all three are ordinary: the spaces around the colons and commas are gone, the double space before \"a\" is gone, and the slash typed as / comes back escaped as \\/ because that is what json_encode does by default. The document is equivalent. The bytes are not.",
+            "why": "This is the vector that catches the defect the whole file exists for. A signer that signed the OBJECT - decoding the body, or accepting an array and encoding it itself - would return the second signature where the first is expected, and the plugin would send a body signed over bytes it did not send. Nothing would fail locally: the outbox would look healthy, the request would leave, and the receiver would answer 401 to every attempt of every sale, which reads like a wrong secret and is not one. The test asserts both signatures over both byte sequences and that they differ.",
+            "keep_the_slash": "The slash in the note is deliberate and must survive any edit of this vector. It is the difference that does not depend on whitespace, so it keeps the vector meaningful even if somebody 'tidies' the spacing out of the raw body."
+        }
+    ]
+}
