@@ -1,0 +1,24 @@
+=== Factuarea for WooCommerce ===
+Contributors: factuarea
+Tags: woocommerce, invoicing, invoices, spain, verifactu
+Requires at least: 6.6
+Tested up to: 7.2
+Requires PHP: 8.1
+Stable tag: 0.1.0
+License: GPLv2 or later
+License URI: https://www.gnu.org/licenses/gpl-2.0.html
+WC requires at least: 8.9
+WC tested up to: 8.9
+
+A listing whose WordPress minimum is not the one the plugin enforces.
+
+== Description ==
+
+The minimum lives in three places: this line, the "Requires at least" header of
+the plugin entry point, and Constants::MINIMUM_WORDPRESS_VERSION, which is the
+one that actually refuses to boot. Raising it here alone tells the directory to
+hide the plugin from a WordPress the code still runs on, and lowering it here
+alone invites an installation the code will refuse.
+
+Everything else in this listing is coherent, so the report has to name these
+three values and only these.

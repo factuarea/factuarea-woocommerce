@@ -16,8 +16,14 @@ use Factuarea\WooCommerce\Contract\Constants;
 use Factuarea\WooCommerce\Events\OrderRefundedListener;
 use Factuarea\WooCommerce\Events\OrderStatusChangedListener;
 use Factuarea\WooCommerce\Events\PaymentCompleteListener;
+use Factuarea\WooCommerce\Inbound\CatalogPushEndpoint;
+use Factuarea\WooCommerce\Inbound\InboundDeliveryLedger;
+use Factuarea\WooCommerce\Inbound\InboundDeliveryTable;
+use Factuarea\WooCommerce\Inbound\OrderRefundEndpoint;
+use Factuarea\WooCommerce\Inbound\OrderStatusEndpoint;
 use Factuarea\WooCommerce\MyAccount\InvoiceCorrelationEndpoint;
 use Factuarea\WooCommerce\MyAccount\InvoicePdfLink;
+use Factuarea\WooCommerce\MyAccount\OrderStatusDisplay;
 use Factuarea\WooCommerce\Outbox\OutboxDispatcher;
 use Factuarea\WooCommerce\Outbox\OutboxTable;
 
@@ -58,11 +64,11 @@ require_once __DIR__ . '/Contract/Constants.php';
  * WHY THERE IS EXACTLY ONE OF THESE
  * ---------------------------------------------------------------------------
  * Every other class of this plugin registers ITSELF - `register()` on the field,
- * on the three listeners, on the settings screen, on the two buyer-facing
- * surfaces. None of them knows about any other, and none of them decides WHEN it
- * is registered. That decision is here, once, in `wire()`, so that the answer to
- * "what does this plugin hook, and under what conditions" is one screen of code
- * rather than a search across twenty files.
+ * on the three listeners, on the settings screen, on the buyer-facing surfaces,
+ * on the three inbound receivers. None of them knows about any other, and none
+ * of them decides WHEN it is registered. That decision is here, once, in
+ * `wire()`, so that the answer to "what does this plugin hook, and under what
+ * conditions" is one screen of code rather than a search across twenty files.
  *
  * ---------------------------------------------------------------------------
  * THE AUTOLOADER IS OURS, AND THAT IS A DISTRIBUTION DECISION
@@ -370,6 +376,43 @@ final class Plugin {
 	 * `woocommerce_init`, and a registration made after that hook has run
 	 * declares a field nobody paints.
 	 *
+	 * ---------------------------------------------------------------------
+	 * THE THREE RECEIVERS ARE REGISTERED UNCONDITIONALLY, AND THAT IS THE
+	 * DECISION
+	 * ---------------------------------------------------------------------
+	 * Each receiver is governed by its own switch, and both switches are born
+	 * off. The switch is read INSIDE the request, not here, because a route
+	 * that is not registered answers 404 - the same answer a WordPress that
+	 * never heard of this plugin gives - and the sender cannot tell "this shop
+	 * has the receiver switched off" from "this address is wrong". Registered
+	 * and switched off answers the frozen `RECEIVER_DISABLED`, which is an
+	 * answer the sender can act on, and it still applies nothing and claims no
+	 * idempotency key.
+	 *
+	 * ---------------------------------------------------------------------
+	 * WHAT OF THE INBOUND HALF IS *NOT* WIRED HERE, AND WHY
+	 * ---------------------------------------------------------------------
+	 * Only the three receivers and the buyer-facing display. The signature
+	 * verifier, the delivery ledger, the fulfilment storage, the refund
+	 * applier, the product resolver and the three catalogue writers have no
+	 * `register()` and hook nothing: they are collaborators the receivers build
+	 * lazily, per request, and a PHP run that never receives a delivery never
+	 * constructs one of them. Wiring them from here would build seven objects
+	 * on every single page view of the shop to serve the requests that do not
+	 * arrive.
+	 *
+	 * The transport client is not built here either, for a harder reason: this
+	 * plugin has ONE outbound door, and the structural gate of the package
+	 * keeps the list of files allowed through it. `OutboxDispatcher` builds its
+	 * own client inside; handing it one from here would make this file a
+	 * consumer of the door and would have to be declared as such.
+	 *
+	 * The order of the last four lines does not matter. "After the invoice
+	 * access" is a property of the buyer's screen and is settled by the hook
+	 * PRIORITY of `OrderStatusDisplay` - 20, against the default 10 of
+	 * `InvoicePdfLink`, on the same two hooks - and not by which line is typed
+	 * first here.
+	 *
 	 * @return void
 	 */
 	private static function wire() {
@@ -384,12 +427,49 @@ final class Plugin {
 		( new InvoiceCorrelationEndpoint() )->register();
 		( new InvoicePdfLink() )->register();
 
+		( new OrderStatusEndpoint() )->register();
+		( new OrderRefundEndpoint() )->register();
+		( new CatalogPushEndpoint() )->register();
+		( new OrderStatusDisplay() )->register();
+
 		add_action( self::DRAIN_HOOK, array( __CLASS__, 'drain_outbox' ), 10, 0 );
 		add_action( 'init', array( __CLASS__, 'ensure_drain_scheduled' ), 20, 0 );
 	}
 
 	/**
-	 * Empties as much of the outbox as one pass is allowed to take.
+	 * Empties as much of the outbox as one pass is allowed to take, and forgets
+	 * the inbound deliveries that are old enough to be forgotten.
+	 *
+	 * ---------------------------------------------------------------------
+	 * WHY THE TWO THINGS RIDE THE SAME PASS
+	 * ---------------------------------------------------------------------
+	 * The inbound ledger needs a housekeeping pass of its own: a row per
+	 * delivery received, kept for as long as the sender could still retry it,
+	 * and removed afterwards. That is one indexed DELETE a minute, and it does
+	 * not deserve a second recurring action.
+	 *
+	 * A second scheduled action would be a second thing that can be lost by a
+	 * database restore or by a cleanup plugin, a second entry on the merchant's
+	 * scheduled-actions screen, and a second hook to unschedule on
+	 * deactivation - all to run a statement that costs less than the SELECT
+	 * this pass already makes. Hanging it here means the ledger is swept
+	 * exactly as often as the outbox is drained, by the schedule this plugin
+	 * already asserts on every request.
+	 *
+	 * The order is deliberate: the outbox first. The drain is what the merchant
+	 * loses money by not running, and a housekeeping DELETE that somehow failed
+	 * must not be able to stand between a paid order and its invoice.
+	 *
+	 * ---------------------------------------------------------------------
+	 * THE CUT-OFF IS NOT COMPOSED HERE
+	 * ---------------------------------------------------------------------
+	 * `InboundDeliveryLedger::prune_cutoff()` is the ONE place that turns the
+	 * retention window into an instant, and this call site asks it rather than
+	 * subtracting anything itself. A subtraction written here would be a second
+	 * retention window, and the day one of the two was shortened the forgotten
+	 * key of a retry in flight would be taken for a new delivery and its effect
+	 * applied a SECOND time. `prune()` returns how many rows it removed and
+	 * never throws.
 	 *
 	 * @return void
 	 */
@@ -397,6 +477,8 @@ final class Plugin {
 		$dispatcher = new OutboxDispatcher();
 
 		$dispatcher->drain( self::DRAIN_BATCH_SIZE );
+
+		( new InboundDeliveryLedger() )->prune( InboundDeliveryLedger::prune_cutoff( time() ) );
 	}
 
 	/**
@@ -431,19 +513,20 @@ final class Plugin {
 	/**
 	 * Creates what the plugin needs on this site and starts the drain.
 	 *
-	 * The table is created here rather than lazily on first write, because the
-	 * first write happens inside the request that took a payment: a shop whose
-	 * table appeared at that moment would be one migration away from losing the
-	 * sale that created it.
+	 * The tables are created here rather than lazily on first write, because
+	 * the first write happens inside the request that took a payment, or inside
+	 * the one applying an inbound delivery: a shop whose table appeared at that
+	 * moment would be one migration away from losing the sale that created it.
 	 *
-	 * On a network activation every site gets its own table, exactly as the
-	 * uninstall routine removes the options from every site. The outbox lives
-	 * under `$wpdb->prefix`, so one table on the main site would leave every
-	 * other shop of the network writing into nothing.
+	 * On a network activation every site gets its own tables, exactly as the
+	 * uninstall routine removes the options from every site. Both the outbox
+	 * and the inbound ledger live under `$wpdb->prefix`, so one pair of tables
+	 * on the main site would leave every other shop of the network writing into
+	 * nothing.
 	 *
 	 * KNOWN LIMIT, written down rather than hidden: a site created AFTER this
-	 * plugin was network-activated gets no table from here. Activating the
-	 * plugin on that site, or reactivating it network-wide, creates it.
+	 * plugin was network-activated gets no tables from here. Activating the
+	 * plugin on that site, or reactivating it network-wide, creates them.
 	 *
 	 * @param bool $network_wide Whether WordPress is activating this plugin for
 	 *                           the whole network.
@@ -506,13 +589,22 @@ final class Plugin {
 	}
 
 	/**
-	 * Creates or updates the outbox of the site that is current right now, and
-	 * schedules its drain.
+	 * Creates or updates the two tables of the site that is current right now,
+	 * and schedules the pass that serves both.
+	 *
+	 * The inbound ledger is created alongside the outbox and by the same route,
+	 * for the same reason and with a sharper edge: the first write to it
+	 * happens inside the request that is APPLYING an inbound delivery, and a
+	 * shop whose ledger appeared at that moment would have no record of the
+	 * delivery it just applied - so the sender's next retry would be taken for
+	 * a new one and applied again. Both calls are idempotent: `dbDelta` on an
+	 * unchanged table is a handful of `DESCRIBE` queries.
 	 *
 	 * @return void
 	 */
 	private static function install_on_current_site() {
 		OutboxTable::install();
+		InboundDeliveryTable::install();
 
 		self::schedule_drain();
 	}

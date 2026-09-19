@@ -278,12 +278,202 @@ async function placeClassicOrder( page, taxId ) {
 	return orderIdFromUrl( page );
 }
 
+/* -------------------------------------------------------------------------
+ * THE INBOUND HALF
+ * ------------------------------------------------------------------------- */
+
+const { readFileSync } = require( 'node:fs' );
+const { join } = require( 'node:path' );
+
+/** Header the plugin's own store identifier travels in, spelled as on the wire. */
+const STORE_ID_HEADER = 'x-factuarea-store-id';
+
+/** Option the merchant's store identifier is kept in. */
+const STORE_ID_OPTION = 'factuarea_wc_store_id';
+
+/** Option that switches the order status and refund receivers on. */
+const ORDER_STATUS_RECEIVER_OPTION = 'factuarea_wc_order_status_receiver_enabled';
+
+/** Option that switches the catalogue, price and stock receiver on. */
+const CATALOG_PUSH_RECEIVER_OPTION = 'factuarea_wc_catalog_push_receiver_enabled';
+
+/**
+ * One of the frozen inbound bodies, as the EXACT BYTES it is on disk.
+ *
+ * Read with no decoding step of any kind, and this is the whole point of the
+ * helper. Those files are the bodies the contract froze - `tests/fixtures/inbound/` -
+ * and the signature the sender puts on them covers key order, indentation and
+ * the final newline. A scenario that went through `require()` or `JSON.parse`
+ * and re-encoded would send a body that means the same and IS different, and
+ * every delivery would come back 401 for a reason that says nothing about the
+ * plugin.
+ *
+ * @param {string} relative Path under tests/fixtures/inbound.
+ * @returns {string} The file, byte for byte.
+ */
+function inboundFixture( relative ) {
+	return readFileSync( join( __dirname, '..', '..', 'fixtures', 'inbound', relative ), 'utf8' );
+}
+
+/**
+ * A field of a frozen body, for the scenario to read.
+ *
+ * Reading is not sending: the decoded copy is used to know WHICH order or key
+ * the body names, while the bytes that travel are always the ones above.
+ *
+ * @param {string} raw One of the frozen bodies.
+ * @param {string} field Field to read.
+ * @returns {any} Whatever that field holds.
+ */
+function fieldOf( raw, field ) {
+	return JSON.parse( raw )[ field ];
+}
+
+/**
+ * Publishes one inbound notice at the shop, the way the platform would.
+ *
+ * The harness SIGNS inside the container with the shop's own secret and POSTs
+ * the bytes at the published address over real HTTP; what comes back is the
+ * receiver's own answer, status and body.
+ *
+ * @param {import('@playwright/test').APIRequestContext} request Playwright request context.
+ * @param {{route: string, body: string, signOver?: string, omitSignature?: boolean}} notice What to publish.
+ * @returns {Promise<{status: number, raw: string, body: any, address: string, sent_bytes: number}>}
+ */
+async function publishInbound( request, notice ) {
+	const payload = {
+		route: notice.route,
+		body: notice.body,
+	};
+
+	if ( notice.signOver !== undefined ) {
+		payload.sign_over = notice.signOver;
+	}
+
+	if ( notice.omitSignature ) {
+		payload.omit_signature = true;
+	}
+
+	return harness( request, 'POST', '/inbound/deliver', payload );
+}
+
+/**
+ * The inbound idempotency ledger as it stands.
+ *
+ * @param {import('@playwright/test').APIRequestContext} request Playwright request context.
+ */
+async function ledger( request ) {
+	return harness( request, 'GET', '/ledger' );
+}
+
+/**
+ * Empties the inbound idempotency ledger.
+ *
+ * @param {import('@playwright/test').APIRequestContext} request Playwright request context.
+ */
+async function purgeLedger( request ) {
+	return harness( request, 'POST', '/ledger/purge' );
+}
+
+/**
+ * Writes options of the plugin under test, and only of the plugin under test.
+ *
+ * @param {import('@playwright/test').APIRequestContext} request Playwright request context.
+ * @param {Record<string, string>} options What to write.
+ */
+async function setOptions( request, options ) {
+	return harness( request, 'POST', '/options', { options } );
+}
+
+/**
+ * Builds the paid order the frozen bodies name, under the identifier they name.
+ *
+ * @param {import('@playwright/test').APIRequestContext} request Playwright request context.
+ * @param {number} id Identifier the fixture names.
+ * @param {string} total Total of the sale.
+ */
+async function createOrder( request, id, total ) {
+	return harness( request, 'POST', '/order/create', { id, total } );
+}
+
+/**
+ * The notes of one order, the merchant's private ones included.
+ *
+ * @param {import('@playwright/test').APIRequestContext} request Playwright request context.
+ * @param {number} orderId The order.
+ */
+async function orderNotes( request, orderId ) {
+	return harness( request, 'GET', `/order/${ orderId }/notes` );
+}
+
+/**
+ * A refund made by the MERCHANT in WooCommerce, carrying no mark of inbound
+ * origin: the control of the anti-loop guard.
+ *
+ * @param {import('@playwright/test').APIRequestContext} request Playwright request context.
+ * @param {number} orderId The order.
+ * @param {string} amount Amount to refund.
+ */
+async function merchantRefund( request, orderId, amount ) {
+	return harness( request, 'POST', `/order/${ orderId }/refund`, { amount } );
+}
+
+/**
+ * Creates one article of the catalogue scenarios from scratch.
+ *
+ * @param {import('@playwright/test').APIRequestContext} request Playwright request context.
+ * @param {object} article What the article starts out as.
+ */
+async function createProduct( request, article ) {
+	return harness( request, 'POST', '/product/create', article );
+}
+
+/**
+ * What the shop holds about one article.
+ *
+ * @param {import('@playwright/test').APIRequestContext} request Playwright request context.
+ * @param {string} sku Reference of the article.
+ */
+async function productBySku( request, sku ) {
+	return harness( request, 'GET', `/product/by-sku/${ sku }` );
+}
+
+/**
+ * Removes articles by reference, so a scenario can start from "this one does
+ * not exist".
+ *
+ * @param {import('@playwright/test').APIRequestContext} request Playwright request context.
+ * @param {string[]} skus References to remove.
+ */
+async function deleteProducts( request, skus ) {
+	return harness( request, 'POST', '/products/delete', { skus } );
+}
+
+/**
+ * Signs the buyer in, through the shop's own login form.
+ *
+ * @param {import('@playwright/test').Page} page The page.
+ * @param {string} login The account.
+ * @param {string} password Its password.
+ */
+async function signIn( page, login, password ) {
+	await page.goto( '/wp-login.php' );
+	await page.fill( '#user_login', login );
+	await page.fill( '#user_pass', password );
+	await page.locator( '#wp-submit' ).click();
+	await page.waitForURL( /wp-admin|my-account/ );
+}
+
 module.exports = {
 	MOCK_TOKEN,
 	MOCK_ROOT,
 	VALID_TAX_ID,
 	TAX_ID_LABEL,
 	DELIVERY_HEADERS,
+	STORE_ID_HEADER,
+	STORE_ID_OPTION,
+	ORDER_STATUS_RECEIVER_OPTION,
+	CATALOG_PUSH_RECEIVER_OPTION,
 	BLOCK_BILLING_FIELDS,
 	fillBlockAddress,
 	placeBlockOrder,
@@ -301,4 +491,17 @@ module.exports = {
 	addProductToCart,
 	orderIdFromUrl,
 	placeClassicOrder,
+	inboundFixture,
+	fieldOf,
+	publishInbound,
+	ledger,
+	purgeLedger,
+	setOptions,
+	createOrder,
+	orderNotes,
+	merchantRefund,
+	createProduct,
+	productBySku,
+	deleteProducts,
+	signIn,
 };

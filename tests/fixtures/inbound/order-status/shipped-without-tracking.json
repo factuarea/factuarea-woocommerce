@@ -1,0 +1,6 @@
+{
+    "order_id": "1042",
+    "status": "shipped",
+    "occurred_at": "2026-09-19T10:30:00+00:00",
+    "idempotency_key": "wc-1042-shipped-20260919T103000Z"
+}

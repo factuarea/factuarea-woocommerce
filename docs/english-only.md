@@ -63,10 +63,12 @@ Everything a person can read that this package authored:
 
 - The plugin name, its description and its directory listing.
 - The checkout field: label, help text, placeholder and validation message.
-- Every settings label, description and button.
+- Every settings label, description and button, **including the receivers section**: the heading, the label of each switch, the paragraph explaining what it does, the line printing the address Factuarea will post to, and the two warnings that section raises - the one about a receiver switched on with no signing secret, and the one about permalinks set to Plain.
 - Every admin notice, including the stalled-outbox one.
+- **Everything the inbound receivers write.** The body of an answer that carries one, the typed reason of a rejected catalogue article, the reason stored on a refund created from a notice, and the private order note each applied notice leaves for the merchant. These reach two audiences - the merchant reading the order screen, and whoever wrote the sender reading the answer - and both read this package in English.
+- **The fulfilment status labels in My account**, which the buyer reads. The status the platform sends is a wire literal, and the label shown for it is a string of this package: the literal stays as it arrived and the label is translated, which is the same split the plugin applies everywhere else.
 - Every exception message and every diagnostic of the connection test.
-- `readme.txt`, `README.md` and everything under `docs/`.
+- `readme.txt`, `README.md` and everything under `docs/`, **`docs/inbound-contract.md` included**: it is the contract a third party programs a sender against, and a contract nobody can read is not published.
 - Code comments, which are read by whoever maintains this package next.
 
 ## What stays in Spanish, and why it is not a violation
@@ -80,13 +82,33 @@ for the person filling it in: they are looking for the word printed on their doc
 The label carries both - an English noun and the Spanish names - which is what a buyer
 recognises.
 
-**Text that arrives from the receiver.** When Factuarea rejects a delivery it sends a
-message for the merchant, and that message is in Spanish. It reaches the outbox and
-the admin notice **relayed verbatim**, because it is a datum this package transports,
-not a literal this package authored. Rewriting it would mean this plugin claiming to
-know what a rejection code it has never heard of means, which is exactly what its
-classifier is built not to do. The gate must read it as data: it lives in a database
-column and in a variable, never in a string literal of `src/`.
+**Text that arrives from the platform, in either direction.** When Factuarea rejects
+a delivery it sends a message for the merchant, and that message is in Spanish. It
+reaches the outbox and the admin notice **relayed verbatim**, because it is a datum
+this package transports, not a literal this package authored. Rewriting it would mean
+this plugin claiming to know what a rejection code it has never heard of means, which
+is exactly what its classifier is built not to do.
+
+The inbound half adds the same category from the opposite side, and it is larger:
+the carrier name of a shipment, the tracking address, the public reference of a
+corrective invoice, the name and the description of an article a catalogue push
+publishes. All of them can be Spanish, all of them are shown to a merchant or a
+buyer, and none of them is translated here. They are the merchant's own data
+arriving from the platform that holds it, and a package that rewrote them would be
+editing the shop's catalogue and the buyer's shipment.
+
+The rule that keeps this honest is where the text lives rather than what language it
+is in: it travels in a request body, a database column or a variable, and **never in
+a string literal of `src/`**. That is exactly what the gate reads, so the distinction
+is mechanical rather than a matter of judgement.
+
+One file holds Spanish literals on purpose and says so in its own text:
+`tests/fixtures/inbound-signature-vectors.json`, whose body and secret are copied
+character for character from the platform's contract. They are one half of a shared
+anchor - change a character and the frozen signature no longer matches - so they are
+not copy and they are not translated. The gate does not sweep `.json`, which is why
+that file carries the reason in a field of its own instead of relying on an allowlist
+entry nobody would find.
 
 Anything else in Spanish is deficit, and it goes in the code rather than in the
 allowlist.

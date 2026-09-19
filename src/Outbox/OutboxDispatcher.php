@@ -115,6 +115,17 @@ use Throwable;
  * where both values are in scope: an identity built from either would make the
  * second attempt of one sale look like a new fact, and the receiver would issue
  * a second invoice into a correlative series that nobody may delete.
+ *
+ * ---------------------------------------------------------------------------
+ * THE STORE IDENTITY OF THE RUN
+ * ---------------------------------------------------------------------------
+ * A delivery also declares WHICH STORE in Factuarea sent it, in this package's
+ * own eighth header. That value belongs to the installation and not to the
+ * entry, so it is read ONCE per run alongside the origin address, and it is
+ * never a precondition: an installation with no identifier configured keeps
+ * delivering exactly as it did before the header existed. Why the identifier
+ * rather than the origin address, and why the header is additive, is written
+ * where the header set is composed - see `Transport\DeliveryHeaders`.
  */
 final class OutboxDispatcher {
 
@@ -295,10 +306,38 @@ final class OutboxDispatcher {
 		 */
 		$configured_origin = (string) home_url();
 
+		/*
+		 * The identifier of this store in Factuarea, read ONCE for the whole
+		 * run, right here next to the origin and for the same reason: both
+		 * describe the INSTALLATION, not the entry, so reading either inside
+		 * the loop would ask the same question once per sale on a drain that
+		 * takes a batch at a time.
+		 *
+		 * It is the value the merchant pasted from Factuarea and NOTHING here
+		 * derives it: not from the body of the order, which is the shop's own
+		 * record of a sale and knows nothing about who it invoices against, and
+		 * not from `home_url()`, which is already travelling in the source
+		 * header and is exactly the thing that fails to tell two shops of one
+		 * connection apart.
+		 *
+		 * IT IS NOT A PRECONDITION. The three checks above end the run without
+		 * claiming anything; this one cannot join them. The header is additive
+		 * and an installation that never configured an identifier has been
+		 * delivering perfectly well without it: refusing to deliver until the
+		 * field is filled in would silence the invoicing of every shop that
+		 * updates this plugin.
+		 *
+		 * Trimmed on read, as every other read of this option in the package
+		 * is, so that a field a merchant pasted into with the surrounding space
+		 * is the empty string here - which is the one value the header composer
+		 * reads as "not configured".
+		 */
+		$store_id = trim( (string) get_option( Constants::OPTION_STORE_ID, '' ) );
+
 		$settled = 0;
 
 		foreach ( $this->outbox->claim_due( $limit ) as $row ) {
-			list( $outcome, $next_attempt_at ) = $this->deliver( $row, $url, $secret, $configured_origin );
+			list( $outcome, $next_attempt_at ) = $this->deliver( $row, $url, $secret, $configured_origin, $store_id );
 
 			try {
 				$this->outbox->settle( (int) $row['id'], $outcome, $next_attempt_at );
@@ -342,9 +381,10 @@ final class OutboxDispatcher {
 	 * @param string               $url               Address to deliver to.
 	 * @param string               $secret            Signing secret of this store.
 	 * @param string               $configured_origin Address this installation reports as its own.
+	 * @param string               $store_id          Identifier of this store in Factuarea, read once for the run, or the empty string when none is configured.
 	 * @return array{0: DeliveryOutcome, 1: int|null} The outcome and the instant of the next attempt, or null when there is to be none.
 	 */
-	private function deliver( array $row, string $url, string $secret, string $configured_origin ): array {
+	private function deliver( array $row, string $url, string $secret, string $configured_origin, string $store_id ): array {
 		try {
 			/*
 			 * The origin is sent AS RECORDED, never re-derived at delivery time.
@@ -376,7 +416,8 @@ final class OutboxDispatcher {
 					$recorded_origin,
 					$signature,
 					self::WEBHOOK_ID,
-					(int) $row['id']
+					(int) $row['id'],
+					$store_id
 				),
 				$raw_body
 			);

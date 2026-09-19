@@ -2,20 +2,33 @@ name: CI
 
 # Continuous integration for factuarea-for-woocommerce.
 #
-# Two jobs, split for a reason rather than for tidiness.
+# Three jobs, split for a reason rather than for tidiness.
 #
 # `verify` runs the whole `composer verify` script - the PHPUnit suites, the
 # WordPress and WooCommerce coding standards, the English-only gate, the
-# no-paywall gate and the packaging step - on every PHP version the plugin
-# claims to support. It runs on all of them because "Requires PHP: 8.1" is a
-# promise made to strangers, and a suite that only ever ran on one runtime does
-# not keep it. The gates are cheap enough that running them three times costs
-# less than working out which of them are runtime-independent and being wrong.
+# no-paywall gate, the version-coherence gate and the packaging step - on every
+# PHP version the plugin claims to support. It runs on all of them because
+# "Requires PHP: 8.1" is a promise made to strangers, and a suite that only ever
+# ran on one runtime does not keep it. The gates are cheap enough that running
+# them three times costs less than working out which of them are
+# runtime-independent and being wrong.
 #
 # `e2e` runs once, on its own, because it starts a WordPress and a browser. It
 # is the only check in this repository that can see the failure the whole plugin
 # exists to prevent: a tax ID field that is registered for one checkout and
-# invisible, in silence, on the other.
+# invisible, in silence, on the other. It runs against the pins of
+# `.wp-env.json`, which are the FLOOR: the oldest WordPress and WooCommerce the
+# plugin promises to work on.
+#
+# `e2e-declared` runs the same scenarios against the CEILING - the pair
+# `readme.txt` declares as tested, which is what the plugin directory publishes
+# and what the official plugin check reads. The two jobs are NOT merged, and
+# that is the decision: a single job could only run against one pair, so merging
+# them would silently stop testing either the promise made to a merchant on an
+# old shop or the claim made to every stranger who reads the listing. Today the
+# two pairs differ only in WordPress - 7.1 declared against 6.5 pinned - and the
+# day `WC tested up to` moves they will differ in both, with nobody editing this
+# file.
 #
 # THIRD-PARTY ACTIONS ARE PINNED BY COMMIT, NEVER BY TAG. A tag is a movable
 # pointer: whoever controls the action can repoint `@v4` at anything, and it
@@ -81,7 +94,7 @@ jobs:
           fi
 
       - name: composer verify
-        # The whole script rather than its five steps one at a time, because the
+        # The whole script rather than its six steps one at a time, because the
         # script is the frozen contract of this repository: a workflow that ran
         # its own list of commands would be a second definition of "verified",
         # and the two would diverge the first time one of them changed.
@@ -157,3 +170,145 @@ jobs:
         # anybody's laptop reading this file for how it is meant to be driven.
         if: always()
         run: npm run e2e:down
+
+  e2e-declared:
+    name: End-to-end — the declared tested pair
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+
+      - uses: shivammathur/setup-php@f3e473d116dcccaddc5834248c87452386958240 # 2.37.2
+        with:
+          # Only to RUN the gate, which is bare PHP with no autoloader and no
+          # WordPress: 8.1 is the floor the package declares, and reading two
+          # text files is not a thing three runtimes would answer differently.
+          # The PHP the scenarios execute against is the one `.wp-env.json`
+          # pins, which this job does not override.
+          php-version: '8.1'
+          coverage: none
+
+      - name: Read the declared tested pair
+        # THE DECLARATION IS NOT RE-PARSED HERE, AND THAT IS THE POINT.
+        #
+        # `scripts/check-tested-up-to.php --emit` prints exactly two lines -
+        # FACTUAREA_E2E_WORDPRESS and FACTUAREA_E2E_WOOCOMMERCE - which are the
+        # two names `tests/e2e/global-setup.js` already reads, so appending them
+        # to the file the runner exports needs no second naming convention. A
+        # job that read `readme.txt` with its own regular expression would be a
+        # second reader of the same declaration, and the day the two disagreed
+        # the one nobody was looking at would win.
+        #
+        # The gate CHECKS before it emits: a listing it refuses emits no pair at
+        # all and fails here, so a declaration just found broken never gets as
+        # far as a green tick.
+        run: php scripts/check-tested-up-to.php --emit >> "$GITHUB_ENV"
+
+      - name: Check the end-to-end harness is there
+        # Same criterion, and the same words, as the job above: a missing
+        # harness FAILS this job rather than skipping it. A skipped job shows a
+        # green tick against "End-to-end — the declared tested pair", which is a
+        # claim that the declared versions were exercised. Nothing would have
+        # run.
+        run: |
+          missing=""
+          for path in .wp-env.json playwright.config.js tests/e2e; do
+            if [ ! -e "$path" ]; then
+              missing="${missing} ${path}"
+            fi
+          done
+          if [ -n "$missing" ]; then
+            echo "::error::The end-to-end harness is not in the repository yet, so WordPress ${FACTUAREA_E2E_WORDPRESS} and WooCommerce ${FACTUAREA_E2E_WOOCOMMERCE} were NOT exercised. Missing:${missing}. This job fails rather than skipping, because a green tick here would claim the declared versions were tested when nothing ran."
+            exit 1
+          fi
+          echo "Harness present: .wp-env.json, playwright.config.js and tests/e2e."
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 22
+
+      - name: Install the harness
+        # Identical to the job above, for the same reason: install from the lock
+        # file when there is one, resolve and say so when there is not.
+        run: |
+          if [ -f package-lock.json ]; then
+            echo "package-lock.json is present: installing exactly what it pins."
+            npm ci
+          else
+            echo "::notice::No package-lock.json in the repository, so the end-to-end tooling is resolved fresh. None of it is published."
+            npm install --no-audit --no-fund
+          fi
+
+      - name: Install the browser
+        run: npx playwright install --with-deps chromium
+
+      - name: Point the environment at the declared pair
+        # WHY THE DECLARED PAIR CANNOT BE PASTED INTO THE URLS AS IT STANDS.
+        #
+        # `.wp-env.json` pins WordPress by SERIES and WooCommerce by RELEASE,
+        # and the asymmetry is not a style choice: wordpress.org serves
+        # `wordpress-6.5.zip`, while the plugin directory serves
+        # `woocommerce.8.9.5.zip` and NOTHING at `woocommerce.8.9.zip`. The
+        # listing declares `WC tested up to: 8.9`, a series, so composing the
+        # download address from it would ask for an artefact that does not
+        # exist and the environment would fail to start for a reason that has
+        # nothing to do with the plugin.
+        #
+        # So the series is RESOLVED into the newest release inside it, from the
+        # directory's own index, and the resolved release is what the override
+        # file names. `tests/e2e/global-setup.js` compares by series prefix
+        # (`inSeries()`), so 8.9.5 satisfies a declaration of 8.9 and 8.10.0
+        # would not.
+        #
+        # The override replaces the WHOLE `plugins` array rather than one entry,
+        # because that is how wp-env merges it: leaving `"."` out would start a
+        # WordPress without the plugin under test.
+        #
+        # `.wp-env.json` itself is never edited. It carries the floor, the job
+        # above defends it, and a job that rewrote it would delete the other
+        # half of what this repository promises.
+        #
+        # A series that resolves to nothing FAILS here, loudly, naming the
+        # declaration. `curl` and `jq` are both on the runner image.
+        run: |
+          set -euo pipefail
+
+          series="${FACTUAREA_E2E_WOOCOMMERCE}"
+          releases="$(curl -fsSL --retry 3 https://api.wordpress.org/plugins/info/1.0/woocommerce.json | jq -r '.versions | keys[]')"
+          release="$(printf '%s\n' "$releases" | awk -v prefix="${series}." 'index($0 ".", prefix) == 1' | sort -V | tail -n1)"
+
+          if [ -z "$release" ]; then
+            echo "::error::readme.txt declares WooCommerce ${series} as tested and the plugin directory publishes no release inside that series, so the declared pair cannot be started. Nothing was exercised; this job fails rather than running against something else."
+            exit 1
+          fi
+
+          printf '{\n  "core": "https://wordpress.org/wordpress-%s.zip",\n  "plugins": [\n    "https://downloads.wordpress.org/plugin/woocommerce.%s.zip",\n    "."\n  ]\n}\n' "${FACTUAREA_E2E_WORDPRESS}" "${release}" > .wp-env.override.json
+
+          echo "Revalidating the declaration against WordPress ${FACTUAREA_E2E_WORDPRESS} and WooCommerce ${release}, the newest release of the declared ${series} series."
+          cat .wp-env.override.json
+
+      - name: Start the containerised WordPress
+        run: npm run e2e:up
+
+      - name: Run the end-to-end scenarios against the declared pair
+        # The exit status of this step IS the verdict of the job, and nothing
+        # softens it. There is deliberately no `continue-on-error` and no
+        # condition on any step of this job: raising `Tested up to` without the
+        # suite passing against the new number leaves the build red, naming the
+        # version it could not stand up, which is the whole reason the
+        # declaration is revalidated by EXECUTING it instead of by reading it.
+        #
+        # The environment guard of `tests/e2e/global-setup.js` also refuses a
+        # site that is not the declared one, so a WordPress that quietly came up
+        # as something else fails here rather than passing as evidence for a
+        # version it never ran.
+        run: npm run e2e
+
+      - name: Stop the containerised WordPress
+        # `always()` so that a failed scenario still tears the environment down,
+        # and the override file goes with it: the documented procedure leaves
+        # nothing behind, and a job that did otherwise would be describing a
+        # procedure nobody could follow on their own machine.
+        if: always()
+        run: |
+          npm run e2e:down
+          rm -f .wp-env.override.json

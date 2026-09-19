@@ -37,6 +37,18 @@ use PHPUnit\Framework\TestCase;
  *    correct one. A check that can only be observed in its passing state is a
  *    check nobody has seen work.
  *
+ * The inbound half adds a second pair of fixtures and four more cases, for a
+ * distinction this gate had never had to make. Until this change the plugin put
+ * NO condition in front of any of its features, so every condition was a
+ * finding by construction. Now there are two - the toggles that govern the two
+ * receivers - and they are legitimate: a merchant setting, off by default, that
+ * costs nobody anything. The pair proves the gate tells them apart from a
+ * receiver whose condition is a purchase; a fifth case drives the whole
+ * repository run so that the sweep is shown to REACH `src/Inbound`, which
+ * pointing the lens at a file by hand never shows; and two more cover the
+ * artefact, which this change fills with new files under `tests`, `scripts` and
+ * `docs`.
+ *
  * The gate is run as a SUBPROCESS rather than included. Two reasons, and the
  * second is the one that matters: the exit code is half of the contract - 0, 1,
  * 2 and 3 mean four different things and the composer script and continuous
@@ -183,13 +195,12 @@ final class NoPaywallGateTest extends TestCase {
 	 * @return void
 	 */
 	public function test_an_artefact_carrying_the_test_suite_is_a_finding(): void {
-		$root = $this->synthetic_repository(
-			"<?php\n/**\n * Plugin Name: Factuarea for WooCommerce\n * License: GPL-2.0-or-later\n * License URI: https://www.gnu.org/licenses/gpl-2.0.html\n */\n"
-		);
+		$root = $this->synthetic_repository( $this->correct_plugin_file() );
 
 		$packaged = $root . '/dist/factuarea-for-woocommerce';
 		$this->write( $packaged . '/factuarea-for-woocommerce.php', "<?php\n" );
 		$this->write( $packaged . '/LICENSE', (string) file_get_contents( $this->repository_root() . '/LICENSE' ) );
+		$this->write( $packaged . '/readme.txt', "=== Factuarea for WooCommerce ===\n" );
 		$this->write( $packaged . '/src/Plugin.php', "<?php\n" );
 		$this->write( $packaged . '/tests/Unit/SomethingTest.php', "<?php\n" );
 		$this->write( $packaged . '/composer.json', "{}\n" );
@@ -214,6 +225,212 @@ final class NoPaywallGateTest extends TestCase {
 	}
 
 	/**
+	 * The gate reports a RECEIVER that answers only for whoever has paid.
+	 *
+	 * The two receiver toggles are the first conditions this plugin ever put in
+	 * front of a feature, and a condition is what a paywall looks like from a
+	 * distance. This case proves the lens tells the two apart in the direction
+	 * that matters: it fails on the receiver whose condition is a purchase.
+	 *
+	 * MEASURED on 2026-09-18 before the vocabulary grew: of the six offences
+	 * below, the gate saw only `license_key`, `plan_level`, `is_premium` and the
+	 * three sentences. It did NOT see the subscription the receiver consults,
+	 * the entitlement beside it, the function that asks whether the plan allows
+	 * the inbound half, or the status the answer carries - four conditions that
+	 * would have shipped a paywalled receiver through a green gate. Each one is
+	 * asserted by its own offence rather than by the total, so a pattern
+	 * deleted from the gate fails here naming itself.
+	 *
+	 * @return void
+	 */
+	public function test_the_gate_fails_on_a_receiver_gated_behind_a_payment(): void {
+		$result = $this->run_gate( array( '--scan', $this->fixture( 'gated-receiver.php' ) ) );
+
+		$this->assertSame(
+			1,
+			$result['status'],
+			'The gate has to exit 1 over a receiver that answers only for whoever has paid. Output: ' . $result['output']
+		);
+
+		$this->assertStringContainsString( 'gated-receiver.php:', $result['output'], 'Every finding names its file and its line.' );
+
+		foreach (
+			array(
+				'license_key'         => 'the licence-credential family',
+				'is_premium'          => 'the paid-tier family',
+				'plan_level'          => 'the plan family',
+				'Upgrade your plan'   => 'the withheld-feature sentence family',
+				'subscription_status' => 'the subscription a receiver would consult',
+				'entitlement'         => 'the entitlement a receiver would consult',
+				'plan_allows'         => 'the question "does the plan allow the inbound half"',
+				'payment_required'    => 'the answer that names the payment as the reason',
+				'paid_tier'           => 'the value the plan is compared against',
+			) as $offence => $what
+		) {
+			$this->assertStringContainsString(
+				$offence,
+				$result['output'],
+				sprintf( '%s is not being enforced: "%s" was not reported. Output: %s', $what, $offence, $result['output'] )
+			);
+		}
+	}
+
+	/**
+	 * The gate passes the receiver whose only condition is the merchant toggle.
+	 *
+	 * Without this half the case above proves only that the gate can shout, and
+	 * the thing it would shout at is the correct implementation of this change:
+	 * two toggles, off by default, that cost nobody anything.
+	 *
+	 * @return void
+	 */
+	public function test_the_gate_passes_on_a_receiver_gated_only_by_its_merchant_toggle(): void {
+		$result = $this->run_gate( array( '--scan', $this->fixture( 'ungated-receiver.php' ) ) );
+
+		$this->assertSame(
+			0,
+			$result['status'],
+			'The gate reported a receiver whose only condition is a setting of the shop. A gate red on correct code is a gate somebody switches off. Output: ' . $result['output']
+		);
+	}
+
+	/**
+	 * The clean receiver fixture really carries the near misses, IN CODE.
+	 *
+	 * The scanner drops comments before it matches, so a near miss parked in a
+	 * docblock proves nothing at all. Each of these is in a string literal, an
+	 * identifier or a call.
+	 *
+	 * @return void
+	 */
+	public function test_the_clean_receiver_fixture_carries_the_near_misses_in_code(): void {
+		$source = (string) file_get_contents( $this->fixture( 'ungated-receiver.php' ) );
+
+		foreach (
+			array(
+				'$order->is_paid()',
+				'subscription or pre-order plugin',
+				'$planner_table',
+				'is_processing_and_paid',
+				'has unlocked it',
+				"'factuarea_wc_order_status_receiver_enabled'",
+			) as $near_miss
+		) {
+			$this->assertStringContainsString(
+				$near_miss,
+				$source,
+				sprintf( 'The clean receiver fixture has to keep carrying "%s": it is there to keep a bare pattern from coming back, and it cannot do that once somebody trims it.', $near_miss )
+			);
+		}
+	}
+
+	/**
+	 * The REPOSITORY sweep, and not only the lens, reaches a paywall added
+	 * under the inbound half.
+	 *
+	 * The two cases above point the lens at a file by hand, which proves the
+	 * vocabulary sees the shape and nothing about where the gate looks when
+	 * nobody points it anywhere. This one drives the whole repository run over
+	 * a synthetic tree whose only offence is inside `src/Inbound`, which is
+	 * where the receivers of this change live.
+	 *
+	 * @return void
+	 */
+	public function test_the_repository_sweep_reaches_a_paywall_under_the_inbound_half(): void {
+		$root = $this->synthetic_repository( $this->correct_plugin_file() );
+
+		$this->write(
+			$root . '/src/Inbound/OrderStatusEndpoint.php',
+			"<?php\n\ndeclare( strict_types = 1 );\n\nfunction factuarea_receiver_is_open(): bool {\n"
+				. "\treturn 'active' === get_option( 'factuarea_wc_subscription_status' );\n}\n"
+		);
+
+		$result = $this->run_gate( array( '--root', $root ) );
+
+		$this->assertSame( 1, $result['status'], 'Output: ' . $result['output'] );
+		$this->assertStringContainsString( 'src/Inbound/OrderStatusEndpoint.php', $result['output'], 'The sweep does not reach the directory the receivers live in.' );
+		$this->assertStringContainsString( 'subscription_status', $result['output'] );
+	}
+
+	/**
+	 * The artefact has to carry the directory listing.
+	 *
+	 * The plugin, its licence and its listing are the three things that travel,
+	 * and until this case the gate required only the first two. An artefact
+	 * without `readme.txt` installs and runs, which is why nothing else catches
+	 * it: what it loses is the page every merchant reads before installing, and
+	 * the directory shows the plugin with no description at all.
+	 *
+	 * @return void
+	 */
+	public function test_the_artefact_must_carry_the_directory_listing(): void {
+		$root = $this->synthetic_repository( $this->correct_plugin_file() );
+
+		$packaged = $root . '/dist/factuarea-for-woocommerce';
+		$this->write( $packaged . '/factuarea-for-woocommerce.php', "<?php\n" );
+		$this->write( $packaged . '/LICENSE', (string) file_get_contents( $this->repository_root() . '/LICENSE' ) );
+		$this->write( $packaged . '/src/Plugin.php', "<?php\n" );
+
+		$result = $this->run_gate( array( '--root', $root ) );
+
+		$this->assertSame( 1, $result['status'], 'Output: ' . $result['output'] );
+		$this->assertStringContainsString( 'readme.txt', $result['output'] );
+		$this->assertStringContainsString( 'does not travel inside the artefact and must', $result['output'] );
+	}
+
+	/**
+	 * Everything this change adds under `tests`, `scripts` and `docs` stays out
+	 * of the artefact, and what stays in is the plugin, its licence and its
+	 * listing.
+	 *
+	 * The exclusions are written as DIRECTORIES rather than as a list of files,
+	 * which is what makes them hold for files nobody has written yet. This case
+	 * measures that claim with the files this change actually adds instead of
+	 * reading the ignore file and believing it.
+	 *
+	 * @return void
+	 */
+	public function test_the_artefact_leaves_out_what_this_change_adds_to_tests_scripts_and_docs(): void {
+		$root = $this->synthetic_repository( $this->correct_plugin_file() );
+
+		$added = array(
+			'tests/Unit/InboundGateTest.php',
+			'tests/fixtures/inbound/order-status/shipped.json',
+			'scripts/check-tested-up-to.php',
+			'docs/inbound-contract.md',
+		);
+
+		foreach ( $added as $path ) {
+			$this->write( $root . '/' . $path, "placeholder\n" );
+		}
+
+		$result = $this->run_gate( array( '--root', $root ) );
+
+		$this->assertSame(
+			0,
+			$result['status'],
+			'A repository carrying what this change adds under tests, scripts and docs must still package cleanly. Output: ' . $result['output']
+		);
+
+		foreach ( $added as $path ) {
+			$this->assertStringNotContainsString(
+				$path,
+				$result['output'],
+				sprintf( '"%s" reached the artefact listing: the exclusion is no longer covering everything under its directory.', $path )
+			);
+		}
+	}
+
+	/**
+	 * A plugin entry point whose header declares the licence this package ships.
+	 *
+	 * @return string
+	 */
+	private function correct_plugin_file(): string {
+		return "<?php\n/**\n * Plugin Name: Factuarea for WooCommerce\n * License: GPL-2.0-or-later\n * License URI: https://www.gnu.org/licenses/gpl-2.0.html\n */\n";
+	}
+
+	/**
 	 * Builds a repository that has everything the gate needs except, optionally,
 	 * the plugin entry point.
 	 *
@@ -231,7 +448,9 @@ final class NoPaywallGateTest extends TestCase {
 
 		$this->write( $root . '/LICENSE', (string) file_get_contents( $this->repository_root() . '/LICENSE' ) );
 		$this->write( $root . '/.distignore', (string) file_get_contents( $this->repository_root() . '/.distignore' ) );
+		$this->write( $root . '/readme.txt', "=== Factuarea for WooCommerce ===\nStable tag: 0.1.0\n" );
 		$this->write( $root . '/src/Plugin.php', "<?php\n\ndeclare( strict_types = 1 );\n" );
+		$this->write( $root . '/uninstall.php', "<?php\n\ndeclare( strict_types = 1 );\n" );
 		$this->write(
 			$root . '/composer.json',
 			(string) json_encode(

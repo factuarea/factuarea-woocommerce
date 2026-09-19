@@ -9,6 +9,8 @@ declare( strict_types = 1 );
 
 namespace Factuarea\WooCommerce\Contract;
 
+use Factuarea\WooCommerce\MyAccount\InvoiceCorrelationEndpoint;
+
 /**
  * The single place where the values that more than one part of this plugin has
  * to agree on are written down.
@@ -82,8 +84,18 @@ namespace Factuarea\WooCommerce\Contract;
  *     public function sign( string $raw_body, string $secret ): string
  *
  *   Factuarea\WooCommerce\Transport\DeliveryHeaders
- *     public function for_order( string $topic, string $resource, string $event, string $source, string $signature, int $webhook_id, int $delivery_id ): array
- *       - returns array<string, string> keyed by the seven header names below.
+ *     public function for_order( string $topic, string $resource, string $event, string $source, string $signature, int $webhook_id, int $delivery_id, string $store_id = '' ): array
+ *       - returns array<string, string> keyed by the seven header names below,
+ *         plus HEADER_STORE_ID when - and only when - a store identifier is
+ *         configured.
+ *       - the eighth parameter is OPTIONAL and LAST, which is what makes the
+ *         widening additive: every call written against the seven-parameter
+ *         form keeps working untouched, exactly as
+ *         `Outbox\RetryPlanner::next_attempt_at()` did with its third. The
+ *         default is the empty string and not null because "no store
+ *         identifier configured" is what `get_option()` returns for an unset
+ *         option, so the absent case and the unconfigured case are one value
+ *         and not two.
  *
  *   Factuarea\WooCommerce\Transport\WordPressHttpClient
  *     public function post( string $url, array $headers, string $raw_body ): HttpResponse
@@ -114,6 +126,123 @@ namespace Factuarea\WooCommerce\Contract;
  *     public function drain( int $limit ): int
  *       - returns how many entries were settled, so a scheduled run can say
  *         what it did.
+ *
+ * ---------------------------------------------------------------------------
+ * FROZEN PUBLIC SIGNATURES - THE INBOUND HALF
+ * ---------------------------------------------------------------------------
+ * The twelve below are the classes of the INBOUND half, and the rule is the
+ * same one the block above states: the class is written by its own phase, the
+ * SIGNATURE is not negotiable. They are frozen here before any of them exists,
+ * because the phases that write them run at the same time and cannot see each
+ * other's work; a caller and a callee that each pick their own shape do not
+ * fail at the boundary, they fail at wiring time, when both are finished.
+ *
+ * None of them is an interface, for the reason already given: there is exactly
+ * one implementation of each inside a plugin.
+ *
+ * The data types they pass around - `Contract\InboundStatusNotice`,
+ * `Contract\InboundRefundNotice`, `Contract\CatalogPushItem`,
+ * `Contract\CatalogPushOutcome`, `Contract\FulfilmentState` and
+ * `Contract\InboundResponseStatus` - are NOT in this list: they are immutable
+ * data without behaviour and they are born whole in the same phase as this
+ * block, because they are what the parallel phases hand each other.
+ *
+ *   Factuarea\WooCommerce\Inbound\InboundSignatureVerifier
+ *     public function verify( string $raw_body, string $presented, string $secret ): bool
+ *       - the ONLY place that decides whether an inbound delivery is
+ *         authenticated. It delegates the computation to
+ *         Transport\DeliverySigner, which already exists: a second hash_hmac in
+ *         this repository would be a second place to get its fourth argument
+ *         wrong, and that argument is the difference between base64 and
+ *         hexadecimal.
+ *       - answers false, never throws, for all three ways of failing - no
+ *         header, a signature that does not correspond, and a shop with no
+ *         secret configured - so that the caller cannot accidentally tell them
+ *         apart in its answer.
+ *
+ *   Factuarea\WooCommerce\Inbound\InboundDeliveryTable
+ *     public static function install(): void
+ *       - idempotent, like Outbox\OutboxTable::install(). Composes the table
+ *         name with the installation prefix and records its own SCHEMA_VERSION
+ *         - declared on the class, exactly as Outbox\OutboxTable declares its
+ *         own - in OPTION_INBOUND_SCHEMA_VERSION, WITHOUT short-circuiting on
+ *         that marker: a reinstall has to recreate the marker against whatever
+ *         table it finds.
+ *
+ *   Factuarea\WooCommerce\Inbound\InboundDeliveryLedger
+ *     public function claim( string $idempotency_key, int $now ): bool
+ *     public function mark_applied( string $idempotency_key, int $now ): bool
+ *     public function forget( string $idempotency_key ): void
+ *     public function prune( int $older_than ): int
+ *     public static function prune_cutoff( int $now ): int
+ *       - `claim` answers false when the key was already applied. It is an
+ *         INSERT that collides with the unique index, never a select followed
+ *         by an insert: the window between those two is exactly where two
+ *         concurrent deliveries of the same key both get through.
+ *       - `forget` is called in ONE situation only - the effect failed AFTER
+ *         the key was claimed - so that the sender's retry can come back.
+ *       - `mark_applied` is the success half of `forget`: the receiver calls it
+ *         once the effect is applied so that `applied_at` tells a delivery that
+ *         was applied apart from a receiver that died between claim and effect.
+ *       - `prune` answers how many rows it removed, and prunes by age using
+ *         INBOUND_RETENTION_SECONDS and no other figure; `prune_cutoff` is the
+ *         ONLY place that turns that window into an instant, so callers never
+ *         write the subtraction themselves.
+ *
+ *   Factuarea\WooCommerce\Inbound\OrderStatusStorage
+ *     public function apply( \WC_Order $order, InboundStatusNotice $notice ): void
+ *       - writes the fulfilment status and its tracking data into the order
+ *         meta named below. NEVER calls WC_Order::set_status(); see
+ *         Contract\FulfilmentState for the chain of effects that would start.
+ *
+ *   Factuarea\WooCommerce\Inbound\RefundApplier
+ *     public function apply( \WC_Order $order, InboundRefundNotice $notice, string $idempotency_key ): void
+ *       - creates the WooCommerce refund with no gateway movement and no
+ *         restock, and marks it with INBOUND_REFUND_META_KEY so that both of
+ *         the plugin's refund captors leave it alone.
+ *
+ *   Factuarea\WooCommerce\Inbound\ProductResolver
+ *     public function resolve( CatalogPushItem $item ): ?\WC_Product
+ *     public function last_rejection(): string
+ *       - `resolve` answers null for "not found" AND for "ambiguous"; which of
+ *         the two it was is read from `last_rejection()`, whose value is one of
+ *         CatalogPushOutcome::REASON_NOT_FOUND or ::REASON_AMBIGUOUS.
+ *       - never creates an article. That decision belongs to the publishing
+ *         mode of the sending platform and travels in the push.
+ *
+ *   Factuarea\WooCommerce\Inbound\CatalogFieldWriter
+ *     public function write( \WC_Product $product, CatalogPushItem $item ): CatalogPushOutcome
+ *
+ *   Factuarea\WooCommerce\Inbound\PriceWriter
+ *     public function write( \WC_Product $product, CatalogPushItem $item ): CatalogPushOutcome
+ *
+ *   Factuarea\WooCommerce\Inbound\StockWriter
+ *     public function write( \WC_Product $product, CatalogPushItem $item ): CatalogPushOutcome
+ *       - the three writers share one shape so that the receiver can run them in
+ *         order over the same article and collect one outcome per article. Each
+ *         one applies ONLY the fields it owns and leaves undeclared ones alone.
+ *
+ *   Factuarea\WooCommerce\Inbound\OrderStatusEndpoint
+ *     public function register(): void
+ *     public function handle( \WP_REST_Request $request ): \WP_REST_Response
+ *
+ *   Factuarea\WooCommerce\Inbound\CatalogPushEndpoint
+ *     public function register(): void
+ *     public function handle( \WP_REST_Request $request ): \WP_REST_Response
+ *       - both register on `rest_api_init` with `permission_callback =>
+ *         '__return_true'` and verify the signature INSIDE handle(), copying
+ *         the pattern and the written reason of
+ *         MyAccount\InvoiceCorrelationEndpoint: the caller is a server, not a
+ *         user with a session, and what authenticates it is the signature.
+ *       - handle() runs in the order that IS the contract: verify the signature
+ *         over the raw body, check the receiver's switch, claim the idempotency
+ *         key, read the body, and only then apply. Nothing is decoded from an
+ *         unverified body and nothing is applied without having claimed first.
+ *
+ *   Factuarea\WooCommerce\MyAccount\OrderStatusDisplay
+ *     public function register(): void
+ *       - hooks the same two points as MyAccount\InvoicePdfLink, so that the
+ *         buyer finds the status where they already find their invoice.
  */
 final class Constants {
 
@@ -193,6 +322,106 @@ final class Constants {
 	public const INVOICE_PDF_PATH = '/v1/invoices/%s/pdf';
 
 	/**
+	 * REST namespace the INBOUND receivers are registered under.
+	 *
+	 * REFERENCED, not re-typed. It is the namespace this plugin already
+	 * publishes (`MyAccount\InvoiceCorrelationEndpoint::REST_NAMESPACE`), and
+	 * writing `'factuarea/v1'` a second time here would create two literals that
+	 * are equal today and diverge the day one of them is edited - at which point
+	 * half of this plugin's routes would answer on a namespace the other half
+	 * does not know about.
+	 *
+	 * The version in it is not decoration: this is a PUBLISHED surface of a
+	 * DISTRIBUTED plugin, so the day the shape has to change there will be shops
+	 * running every version released until then.
+	 */
+	public const INBOUND_REST_NAMESPACE = InvoiceCorrelationEndpoint::REST_NAMESPACE;
+
+	/**
+	 * The only HTTP method the inbound receivers answer, referenced from the
+	 * precedent for the same reason as the namespace.
+	 */
+	public const INBOUND_REST_METHOD = InvoiceCorrelationEndpoint::REST_METHOD;
+
+	/**
+	 * Route of the ORDER STATUS receiver, relative to the namespace above. The
+	 * full address a sender posts to is
+	 * `<site>/wp-json/factuarea/v1/order-status`.
+	 *
+	 * MEASURED, not chosen. Read on 2026-09-18 off the frozen contract the
+	 * platform publishes for this lane,
+	 * `backend/docs/architecture/store-order-status-receiver-contract.md` §2, and
+	 * off the constructor behind it,
+	 * `App\Integration\Infrastructure\Provider\Adapters\WooCommerce\WooCommerceEndpoints::orderStatus()`,
+	 * which composes `{baseUrl}` + `/wp-json/factuarea/v1/` + `order-status`.
+	 * The sender exists and is deployed: a route spelled otherwise here is a 404
+	 * on every notice.
+	 */
+	public const INBOUND_ORDER_STATUS_ROUTE = '/order-status';
+
+	/**
+	 * Route of the REFUND receiver, relative to the same namespace.
+	 *
+	 * MEASURED on the same day and from the same two places: §2 of that contract
+	 * lists TWO routes, and `WooCommerceEndpoints::orderRefund()` composes
+	 * `order-refund` exactly as its sibling composes `order-status`.
+	 *
+	 * IT IS A SEPARATE ROUTE, and the contract says why in its own words: the
+	 * two notices have different bodies, different risks and different
+	 * permissions in the receiver, so a single entry point would force this
+	 * plugin to branch on the content before knowing what it is validating, and
+	 * the day the status notice changes shape it would drag the one about money
+	 * with it.
+	 *
+	 * The planning documents of THIS change describe a single receiver that
+	 * tells the two notices apart by their shape. The measured contract wins,
+	 * because the sender is already written against it; the divergence is
+	 * reported rather than resolved in silence.
+	 */
+	public const INBOUND_ORDER_REFUND_ROUTE = '/order-refund';
+
+	/**
+	 * Route of the CATALOGUE, PRICE and STOCK push receiver, relative to the
+	 * same namespace.
+	 *
+	 * DECIDED HERE, and said out loud because it is the one inbound address that
+	 * is NOT measured. The outbound catalogue lane of the platform was read on
+	 * 2026-09-18 (`WooCommerceCatalogWriter`, `WooCommercePriceWriter`,
+	 * `WooCommerceInventoryWriter` and the route table they all use): today it
+	 * writes through the NATIVE WooCommerce REST API - `wc/v3/products/batch`
+	 * and `wc/v3/products/{id}/variations/batch` - with the store's key/secret
+	 * pair, and names no address under this plugin's namespace at all.
+	 *
+	 * So this receiver is born without a sender, on purpose and with its
+	 * contract published first, which is the opposite of what happened with the
+	 * invoice correlation route. `catalog-push` is chosen to match the vocabulary
+	 * the platform already uses for that lane (`store-outbound-catalog-push`,
+	 * `CatalogPushMode`, `StoreOutboundPushKind::catalog()`), so that whoever
+	 * writes the sender finds the name they would have guessed.
+	 */
+	public const INBOUND_CATALOG_PUSH_ROUTE = '/catalog-push';
+
+	/**
+	 * Header carrying the signature of an INBOUND delivery.
+	 *
+	 * REFERENCED from `MyAccount\InvoiceCorrelationEndpoint::SIGNATURE_HEADER`
+	 * rather than written again. It is the same header name, because it is the
+	 * same plugin receiving on its own routes, and the scheme is the same too -
+	 * base64 of the HMAC-SHA256 digest of the RAW body, keyed with the store
+	 * signing secret.
+	 *
+	 * DO NOT CONFUSE IT WITH THE OUTGOING ONE. Deliveries this plugin SENDS sign
+	 * themselves into `HEADER_SIGNATURE` (`X-WC-Webhook-Signature`), because they
+	 * impersonate a native WooCommerce webhook down to the header names. And the
+	 * platform has a THIRD lane - its outbound webhooks to an endpoint the
+	 * customer configures - which uses this very name with a DIFFERENT scheme:
+	 * hexadecimal over `timestamp.'.'.body`. The name says nothing about the
+	 * scheme; the receiver does. Unifying them because they look alike would
+	 * reject every delivery of this lane.
+	 */
+	public const INBOUND_SIGNATURE_HEADER = InvoiceCorrelationEndpoint::SIGNATURE_HEADER;
+
+	/**
 	 * Delivery header carrying the address of the store the event came from.
 	 */
 	public const HEADER_SOURCE = 'X-WC-Webhook-Source';
@@ -259,12 +488,82 @@ final class Constants {
 	);
 
 	/**
+	 * EIGHTH delivery header, this plugin's own, carrying the identifier of the
+	 * store as it was configured.
+	 *
+	 * It is deliberately NOT in DELIVERY_HEADERS above. That list is «the seven
+	 * a native WooCommerce delivery sends», it is asserted as such, and a
+	 * receiver that only knows those seven has to keep accepting the delivery
+	 * without changing a line. This one is ADDITIVE: it travels only when a
+	 * store identifier is configured, and its absence is an ordinary delivery.
+	 *
+	 * WHY THE IDENTIFIER AND NOT THE ORIGIN ADDRESS. The address already travels
+	 * in HEADER_SOURCE (`home_url()`), and it does NOT tell two shops registered
+	 * under the same connection apart. The identifier is the value the merchant
+	 * pasted from Factuarea, so it is exactly the key an identity extractor on
+	 * the other side would need, and guessing which of two shops sent a sale is
+	 * guessing which company it invoices against.
+	 */
+	public const HEADER_STORE_ID = 'X-Factuarea-Store-Id';
+
+	/**
 	 * Name of the outbox table, WITHOUT the WordPress table prefix. Whoever
 	 * builds the real name prepends `$wpdb->prefix`: a hard-coded `wp_` breaks
 	 * every installation that chose another prefix, which is most of the ones
 	 * that were ever migrated.
 	 */
 	public const OUTBOX_TABLE = 'factuarea_outbox';
+
+	/**
+	 * Name of the INBOUND delivery table, WITHOUT the WordPress table prefix,
+	 * exactly like the outbox one above: whoever builds the real name prepends
+	 * `$wpdb->prefix`, because a hard-coded `wp_` breaks every installation that
+	 * chose another prefix.
+	 *
+	 * It holds the idempotency keys of the deliveries that have been applied,
+	 * with a UNIQUE index on the key. A TABLE and not an option or an order
+	 * meta, and the reason is atomicity: an option is one row read and written
+	 * whole, so two simultaneous deliveries overwrite each other and the claim
+	 * stops being atomic; and an order meta only serves the notices that already
+	 * resolved their order, while a catalogue push has no order at all.
+	 *
+	 * The claim is an INSERT that either goes in or collides with the index.
+	 * There is no window between checking and acting, which is exactly the
+	 * window two concurrent deliveries walk through.
+	 *
+	 * ON UNINSTALL THIS TABLE IS DROPPED, unlike the outbox one. The outbox
+	 * holds deliveries that happened and is the merchant's record; this one is
+	 * internal deduplication bookkeeping and says nothing to anybody.
+	 */
+	public const INBOUND_TABLE = 'factuarea_inbound';
+
+	/**
+	 * How long an applied idempotency key is kept, in seconds. THIRTY DAYS.
+	 *
+	 * THE NUMBER IS NOT A PREFERENCE, IT IS A FLOOR WITH A MARGIN. It has to be
+	 * STRICTLY GREATER than the total span of the shared retry schedule,
+	 * because a retry that arrives with its key already purged is taken for a
+	 * new delivery and its effect is applied a SECOND time - a second refund on
+	 * an order, a second corrective invoice behind it.
+	 *
+	 * Measured against `RetrySchedule::INTERVALS` on 2026-09-18: the seven waits
+	 * are 60, 300, 1800, 7200, 43200, 86400 and 259200 seconds, which add up to
+	 * 398,160 seconds - 4 days, 14 hours and 36 minutes. With the +/-10 per cent
+	 * of `RetrySchedule::JITTER_RATIO` the worst case is 437,976 seconds, a bit
+	 * over 5 days. Thirty days is 2,592,000, so the margin is roughly six times
+	 * the whole schedule, which absorbs a sender rescued late from a queue that
+	 * was stopped.
+	 *
+	 * The test that guards it compares this value with the SUM of
+	 * `RetrySchedule::INTERVALS` and not with a number typed by hand, so that
+	 * widening the schedule turns the test red instead of opening the hole in
+	 * silence.
+	 *
+	 * The prune runs on the SAME scheduled pass that already drains the outbox.
+	 * A second scheduled task would be a second thing that can be disabled in a
+	 * shop, and the one that got disabled would be this one.
+	 */
+	public const INBOUND_RETENTION_SECONDS = 2592000;
 
 	/**
 	 * Prefix shared by every option this plugin stores. It is what the uninstall
@@ -356,6 +655,48 @@ final class Constants {
 	public const OPTION_OUTBOX_SCHEMA_VERSION = 'factuarea_wc_outbox_schema_version';
 
 	/**
+	 * Option holding whether the ORDER STATUS receiver is switched on.
+	 *
+	 * IT IS BORN DISABLED, and that is the point of it existing at all: updating
+	 * the plugin must not change the behaviour of a shop that touched nothing.
+	 * It is the same rule the outgoing lane applies with OPTION_DELIVERY_ENABLED.
+	 *
+	 * A delivery to a disabled receiver is answered declaring it disabled and
+	 * its idempotency key is NOT recorded. Recording it would mean that, after
+	 * the merchant switched the receiver on, the sender's retry would get a
+	 * "redelivery discarded" and take as published a notice that was never
+	 * applied.
+	 */
+	public const OPTION_ORDER_STATUS_RECEIVER_ENABLED = 'factuarea_wc_order_status_receiver_enabled';
+
+	/**
+	 * Option holding whether the CATALOGUE, PRICE and STOCK push receiver is
+	 * switched on. Born disabled, for the same reasons as the one above.
+	 *
+	 * The two receivers get one switch each and NOT one switch between them: a
+	 * merchant who wants their prices published from Factuarea does not
+	 * necessarily want anything written into their orders, and one switch would
+	 * make them take both or neither.
+	 *
+	 * Neither switch has a second SECRET next to it. The signing secret is ONE -
+	 * the one that already signs the outgoing deliveries - because a second
+	 * field is a second place for the merchant to get it wrong and a second
+	 * value to rotate.
+	 */
+	public const OPTION_CATALOG_PUSH_RECEIVER_ENABLED = 'factuarea_wc_catalog_push_receiver_enabled';
+
+	/**
+	 * Option recording the installed schema version of the INBOUND delivery
+	 * table.
+	 *
+	 * Written by `Inbound\InboundDeliveryTable::install()` on activation, and
+	 * deleted on uninstall like every other option. Unlike the outbox marker,
+	 * here the TABLE goes too; see INBOUND_TABLE for why the two tables are
+	 * treated differently.
+	 */
+	public const OPTION_INBOUND_SCHEMA_VERSION = 'factuarea_wc_inbound_schema_version';
+
+	/**
 	 * Every option this plugin writes. The uninstall routine deletes exactly
 	 * this list and nothing else, enumerated one by one rather than matched by
 	 * prefix: a prefix match would happily delete an option a future version of
@@ -372,6 +713,9 @@ final class Constants {
 		self::OPTION_DELIVERY_ENABLED,
 		self::OPTION_SECRET_REVEALED,
 		self::OPTION_OUTBOX_SCHEMA_VERSION,
+		self::OPTION_ORDER_STATUS_RECEIVER_ENABLED,
+		self::OPTION_CATALOG_PUSH_RECEIVER_ENABLED,
+		self::OPTION_INBOUND_SCHEMA_VERSION,
 	);
 
 	/**
@@ -474,6 +818,109 @@ final class Constants {
 	 * absence means nothing is shown, never a broken link.
 	 */
 	public const INVOICE_ID_META_KEY = '_factuarea_invoice_id';
+
+	/**
+	 * Meta key holding the fulfilment status this plugin RECEIVED for an order.
+	 *
+	 * It is the plugin's OWN status and it never replaces the native order
+	 * status; `Contract\FulfilmentState` holds the three reasons. Its value is
+	 * one of the four of that class, stored as the wire literal so that what is
+	 * in the database is the same string the notice carried.
+	 *
+	 * Its PRESENCE is what makes the status section appear for the buyer; its
+	 * absence means nothing is shown, exactly as the invoice access works.
+	 */
+	public const FULFILMENT_STATUS_META_KEY = '_factuarea_fulfilment_status';
+
+	/**
+	 * Meta key holding the tracking number of the shipment.
+	 *
+	 * Written only when the notice declares it, and DELETED when a later notice
+	 * no longer does: a shop that kept it would show the buyer the tracking of a
+	 * previous shipment as if it were the current one.
+	 */
+	public const TRACKING_NUMBER_META_KEY = '_factuarea_tracking_number';
+
+	/**
+	 * Meta key holding the carrier name of the shipment. Same write-and-delete
+	 * rule as the number.
+	 */
+	public const TRACKING_CARRIER_META_KEY = '_factuarea_tracking_carrier';
+
+	/**
+	 * Meta key holding the tracking address of the shipment.
+	 *
+	 * Stored EXACTLY as it arrived and never recomposed from the carrier and the
+	 * number: the platform derives it from its own carrier template and does not
+	 * persist it in any column, so deriving it a second time here would give two
+	 * different addresses for the same shipment the day that template changes.
+	 */
+	public const TRACKING_URL_META_KEY = '_factuarea_tracking_url';
+
+	/**
+	 * Meta key holding the instant of the LAST fulfilment notice applied to the
+	 * order, as the notice declared it.
+	 *
+	 * It exists so that a notice that arrives LATE does not overwrite a more
+	 * recent one that was already applied. Deliveries are queued and retried,
+	 * so «shipped» published at 10:00 can legitimately arrive after «delivered»
+	 * published at 11:00, and without this the buyer would be told their parcel
+	 * is on its way after being told it arrived.
+	 *
+	 * It stores the instant OF THE FACT and not the instant of the write: the
+	 * write order is the one that is wrong.
+	 */
+	public const FULFILMENT_APPLIED_AT_META_KEY = '_factuarea_fulfilment_applied_at';
+
+	/**
+	 * Meta key written ON THE REFUND OBJECT that this plugin created from an
+	 * inbound notice, holding the idempotency key that produced it.
+	 *
+	 * THE ANTI-LOOP MARK, and it has to be read by BOTH refund captors of this
+	 * plugin, not one:
+	 *
+	 *  1. `Events\OrderRefundedListener::record_refund()` fires on
+	 *     `woocommerce_order_refunded`, which `wc_create_refund()` triggers.
+	 *  2. `Events\OrderStatusChangedListener::refund_identities()` composes one
+	 *     identity PER REFUND of the order, and a TOTAL refund also changes the
+	 *     order status, which is that listener's hook.
+	 *
+	 * Guarding only the first leaves the loop open through the second, and the
+	 * symptom arrives weeks later as a DUPLICATED corrective invoice in a series
+	 * filed with the tax authority, where a document is not deleted but
+	 * corrected with another document.
+	 */
+	public const INBOUND_REFUND_META_KEY = '_factuarea_inbound_refund';
+
+	/**
+	 * Meta key holding the public reference of the corrective invoice that backs
+	 * an inbound refund, so that merchant and buyer can both see which document
+	 * the money came back under.
+	 *
+	 * The PUBLIC reference - the number of the document - and never an internal
+	 * identifier of the platform: the buyer may have to quote it.
+	 */
+	public const CORRECTIVE_REFERENCE_META_KEY = '_factuarea_corrective_reference';
+
+	/**
+	 * Meta key holding the scope of an inbound refund, `total` or `partial`, as
+	 * `Contract\InboundRefundNotice` declares them.
+	 */
+	public const REFUND_SCOPE_META_KEY = '_factuarea_refund_scope';
+
+	/**
+	 * Meta key of the ARTICLE, holding the remote identity resolved for it.
+	 *
+	 * Written when a catalogue push resolved the article by its REFERENCE, so
+	 * that the next push resolves it by identity and does not search again. The
+	 * search is the expensive and the ambiguous half of the resolution: a
+	 * reference that two articles share is not applied to either, and once the
+	 * identity is recorded that question is never asked again for that article.
+	 *
+	 * It carries ONE value - the WooCommerce product handle - and not a
+	 * product/variation pair: a variation is addressed by its own identifier.
+	 */
+	public const REMOTE_PRODUCT_ID_META_KEY = '_factuarea_remote_product_id';
 
 	/**
 	 * Field name of the rejection code inside a rejection body of the ingestion

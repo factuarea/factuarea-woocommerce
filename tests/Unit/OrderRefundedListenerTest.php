@@ -73,6 +73,16 @@ use PHPUnit\Framework\TestCase;
  *  7. NOT ONE NETWORK CALL HAPPENS INSIDE THE HOOK. The whole point of an
  *     outbox: the delivery belongs to the drain, outside this request.
  *
+ *  8. A REFUND THAT CAME FROM FACTUAREA DOES NOT GO BACK TO FACTUAREA. The
+ *     inbound half of this plugin records published refunds with
+ *     `wc_create_refund()`, which fires this hook exactly as the merchant's own
+ *     refund does. Delivering it back means a SECOND corrective invoice over one
+ *     sale, in a series filed with the tax authority where a document is not
+ *     deleted. The cases assert both halves of the guard - the marked refund
+ *     stops, the merchant's refund travels untouched - and the ORDER of the
+ *     reads, because a guard that ran after the body was built would look green
+ *     while paying the whole cost of every refund it discards.
+ *
  * The identity composer is used FOR REAL, because it is the piece that makes the
  * three capture routes converge and doubling it would turn every identity
  * assertion into an assertion about this file's own idea of one. What is doubled
@@ -101,9 +111,26 @@ final class OrderRefundedListenerTest extends TestCase {
 	private const SECOND_REFUND_ID = 9002;
 
 	/**
+	 * A refund of the same order that the doubled `wc_get_order()` does not know
+	 * about, standing for the refund object that cannot be read back - deleted
+	 * in the same request, or a hook fired by other code naming something that
+	 * is not a refund.
+	 */
+	private const UNREADABLE_REFUND_ID = 9007;
+
+	/**
 	 * Identifier of this shop at the receiver, as the settings hold it.
 	 */
 	private const STORE_ID = 'str_9f2c41';
+
+	/**
+	 * The value the inbound half writes into the anti-loop mark: the idempotency
+	 * key of the notice that produced the refund.
+	 *
+	 * It is the real shape and not a placeholder, because the guard's rule is
+	 * about the value being there and not about what it says.
+	 */
+	private const INBOUND_MARK = '3f7c1e0b9a4d5266c8b1f0e4a7d29c3155e8b6470ad9f21c3e5a7b8d9c0f1234';
 
 	/**
 	 * Address of the shop, exactly as `home_url()` reports it.
@@ -208,6 +235,21 @@ final class OrderRefundedListenerTest extends TestCase {
 	private array $added_actions = array();
 
 	/**
+	 * Everything the listener reached for, in the order it reached for it.
+	 *
+	 * Three kinds of entry - `load:<id>` for a refund object read, `build:<id>`
+	 * for a delivery body built and `enqueue:<identity>` for an outbox write -
+	 * and the ORDER between them is the point. The anti-loop guard has to read
+	 * the mark BEFORE the body is built, and a guard that read it afterwards
+	 * would still not enqueue, still pass every assertion about the outbox, and
+	 * still pay the cost of building a body for every refund the platform
+	 * published. That cost is the one this trace makes visible.
+	 *
+	 * @var array<int, string>
+	 */
+	private array $trace = array();
+
+	/**
 	 * Installs the doubles of the WordPress functions the listener reaches for.
 	 * There are five, and that is the measure of the class: it knows the outbox,
 	 * the identity and the shop, and nothing about HTTP.
@@ -231,6 +273,7 @@ final class OrderRefundedListenerTest extends TestCase {
 		$this->refund_meta   = array();
 		$this->refunds_saved = array();
 		$this->added_actions = array();
+		$this->trace         = array();
 		$this->logger        = new RefundListenerLoggerSpy();
 
 		$this->refunds = array(
@@ -271,6 +314,8 @@ final class OrderRefundedListenerTest extends TestCase {
 
 		Functions\when( 'wc_get_order' )->alias(
 			function ( $order_id ) {
+				$this->trace[] = 'load:' . (int) $order_id;
+
 				return $this->refunds[ (int) $order_id ] ?? false;
 			}
 		);
@@ -659,8 +704,220 @@ final class OrderRefundedListenerTest extends TestCase {
 	}
 
 	// ---------------------------------------------------------------------
+	// The anti-loop guard.
+	// ---------------------------------------------------------------------
+
+	/**
+	 * A refund this plugin created from an inbound notice is not delivered back.
+	 *
+	 * The platform published a corrective document, this plugin recorded the
+	 * money against the order, and `wc_create_refund()` fired this hook exactly
+	 * as it does for a refund the merchant typed in. Without the guard the
+	 * refund would travel back as a return of the shop and be corrected a SECOND
+	 * time, in a consecutive series filed with the tax authority where a
+	 * document is not deleted.
+	 *
+	 * Nothing is logged either: this is the expected outcome of a working
+	 * integration and not a failure, and a shop that receives refunds from the
+	 * platform every day would otherwise fill its log screen with error lines
+	 * about them.
+	 *
+	 * @return void
+	 */
+	public function test_a_refund_created_from_an_inbound_notice_is_never_enqueued(): void {
+		$this->mark_as_inbound( self::FIRST_REFUND_ID );
+
+		$this->listener()->record_refund( self::ORDER_ID, self::FIRST_REFUND_ID );
+
+		$this->assertSame( array(), $this->enqueue_calls, 'A refund the platform published was delivered back to it, which corrects one sale twice in a series filed with the tax authority.' );
+		$this->assertSame( array(), $this->outbox_rows, 'The outbox gained an entry for a refund that came from the platform.' );
+		$this->assertSame( array(), $this->refunds_saved, 'The refund was written to, so a key was kept for a delivery that must never happen.' );
+		$this->assertSame( array(), $this->logger->errors, 'The guard logged an error, but a refund arriving from the platform is the integration working, not a failure.' );
+	}
+
+	/**
+	 * The mark is read BEFORE the body is built, which is the expensive half.
+	 *
+	 * A guard placed after the build would enqueue nothing all the same and pass
+	 * every assertion above, while still assembling a full order representation
+	 * for every refund the platform publishes. The trace is what tells the two
+	 * apart: for a refund that carries the mark the listener reads the refund and
+	 * stops there.
+	 *
+	 * @return void
+	 */
+	public function test_the_inbound_mark_is_read_before_the_body_is_built(): void {
+		$this->mark_as_inbound( self::FIRST_REFUND_ID );
+
+		$this->listener()->record_refund( self::ORDER_ID, self::FIRST_REFUND_ID );
+
+		$this->assertSame(
+			array( 'load:' . self::FIRST_REFUND_ID ),
+			$this->trace,
+			'The listener did something other than read the refund and stop: the mark has to be read before the identity is composed and before the body is built.'
+		);
+
+		$this->assertSame( array(), $this->built_for, 'A delivery body was built for a refund that was never going to be delivered.' );
+	}
+
+	/**
+	 * A refund the merchant gave back in WooCommerce carries no mark and travels
+	 * exactly as it did before the guard existed - and it is read first.
+	 *
+	 * @return void
+	 */
+	public function test_a_refund_the_merchant_made_is_delivered_exactly_as_before(): void {
+		$this->listener()->record_refund( self::ORDER_ID, self::FIRST_REFUND_ID );
+
+		$this->assertSame(
+			array(
+				'load:' . self::FIRST_REFUND_ID,
+				'build:' . self::ORDER_ID,
+				'enqueue:' . EventIdentity::for_refund( self::FIRST_REFUND_ID ),
+			),
+			$this->trace,
+			'A refund of the shop no longer follows the path it followed before the guard: read the refund, build the body of the parent order, enqueue it.'
+		);
+
+		$this->assertCount( 1, $this->outbox_rows, 'The merchant refunded a customer and nothing was recorded for Factuarea.' );
+
+		$this->assertSame(
+			EventIdentity::idempotency_key( self::STORE_ID, EventIdentity::for_refund( self::FIRST_REFUND_ID ) ),
+			$this->refund_meta[ self::FIRST_REFUND_ID ][ Constants::IDEMPOTENCY_KEY_META_KEY ] ?? null,
+			'The refund of the shop lost the key the receiver will derive for it.'
+		);
+	}
+
+	/**
+	 * One order with one refund of each origin delivers the merchant's one and
+	 * only the merchant's one.
+	 *
+	 * This is the case the guard exists for, in the shape it actually happens in:
+	 * a customer returns one item, the platform publishes the corrective document
+	 * and records the money here, and later the merchant gives back a second
+	 * amount by hand. Two refunds, two facts, and exactly one of them is this
+	 * shop's to report.
+	 *
+	 * @return void
+	 */
+	public function test_an_inbound_refund_and_a_shop_refund_on_one_order_deliver_only_the_shop_one(): void {
+		$this->mark_as_inbound( self::FIRST_REFUND_ID );
+
+		$listener = $this->listener();
+
+		$listener->record_refund( self::ORDER_ID, self::FIRST_REFUND_ID );
+		$listener->record_refund( self::ORDER_ID, self::SECOND_REFUND_ID );
+
+		$this->assertSame(
+			array( EventIdentity::for_refund( self::SECOND_REFUND_ID ) ),
+			array_keys( $this->outbox_rows ),
+			'The outbox does not hold exactly the refund the merchant gave back, under its own identity.'
+		);
+
+		$this->assertSame( array( self::ORDER_ID ), $this->built_for, 'A body was built once per refund instead of once for the only refund that travels.' );
+		$this->assertSame( array( self::SECOND_REFUND_ID ), $this->refunds_saved, 'A key was kept against a refund that came from the platform.' );
+	}
+
+	/**
+	 * A mark with nothing in it is not a mark.
+	 *
+	 * WooCommerce answers an empty string for a meta key that was never written,
+	 * so "present" cannot be told apart from "absent" and the guard reads the
+	 * VALUE. The inbound half always writes the idempotency key that produced the
+	 * refund, so a refund of the platform always has one; a refund of the shop
+	 * with an empty leftover under that key is a refund of the shop, and it
+	 * travels.
+	 *
+	 * @return void
+	 */
+	public function test_a_mark_with_no_value_in_it_does_not_hold_a_refund_back(): void {
+		$this->refund_meta[ self::FIRST_REFUND_ID ][ Constants::INBOUND_REFUND_META_KEY ] = '   ';
+
+		$this->listener()->record_refund( self::ORDER_ID, self::FIRST_REFUND_ID );
+
+		$this->assertCount( 1, $this->outbox_rows, 'An empty value under the mark held back a refund of the shop, which loses the corrective document for money the merchant gave back.' );
+	}
+
+	/**
+	 * A mark of any non-scalar shape still holds the refund back, exactly as
+	 * the status captor reads it: the two guards must agree on what a mark is.
+	 *
+	 * @return void
+	 */
+	public function test_a_mark_that_is_not_a_scalar_still_holds_the_refund_back(): void {
+		$this->refund_meta[ self::FIRST_REFUND_ID ][ Constants::INBOUND_REFUND_META_KEY ] = array( 'key' => 'abc' );
+
+		$this->listener()->record_refund( self::ORDER_ID, self::FIRST_REFUND_ID );
+
+		$this->assertCount( 0, $this->outbox_rows, 'A value of any shape under the anti-loop key is a mark; sending the refund on would reopen the loop.' );
+	}
+
+	/**
+	 * A refund whose object cannot be read back is delivered, exactly as it was
+	 * before the guard existed.
+	 *
+	 * The guard is a reason NOT to deliver, and it needs the refund in hand to
+	 * have one. A refund that cannot be read gives it no reason, so the capture
+	 * goes ahead: a refund delivered twice is corrected by the receiver's
+	 * idempotency, and a refund never delivered is money given back with no
+	 * corrective document at all.
+	 *
+	 * @return void
+	 */
+	public function test_a_refund_whose_object_cannot_be_read_is_still_delivered(): void {
+		$this->listener()->record_refund( self::ORDER_ID, self::UNREADABLE_REFUND_ID );
+
+		$this->assertArrayHasKey(
+			EventIdentity::for_refund( self::UNREADABLE_REFUND_ID ),
+			$this->outbox_rows,
+			'A refund whose object could not be read was dropped, so the guard became a new way of losing a refund of the shop.'
+		);
+
+		$this->assertSame( array(), $this->refunds_saved, 'A key was written against a refund object that could not be read.' );
+	}
+
+	/**
+	 * The guard reads the mark through the frozen constant and never through a
+	 * literal of its own.
+	 *
+	 * The key is declared once, in the contract of the package, and BOTH refund
+	 * captors read that declaration. A literal copied here would keep passing on
+	 * the day the contract renames the key, and the loop would reopen silently in
+	 * one of the two captors.
+	 *
+	 * @return void
+	 */
+	public function test_the_guard_reads_the_mark_declared_by_the_contract(): void {
+		$code = $this->source_without_comments();
+
+		$this->assertStringContainsString(
+			'Constants::INBOUND_REFUND_META_KEY',
+			$code,
+			'The capture does not read the anti-loop mark through the constant the contract declares.'
+		);
+
+		$this->assertStringNotContainsString(
+			"'" . Constants::INBOUND_REFUND_META_KEY . "'",
+			$code,
+			'The capture carries its own copy of the mark key, which survives a rename of the declared one.'
+		);
+	}
+
+	// ---------------------------------------------------------------------
 	// Fixtures and helpers.
 	// ---------------------------------------------------------------------
+
+	/**
+	 * Marks a refund as one this plugin created from an inbound notice, the way
+	 * the inbound half does it: the idempotency key of the notice, written onto
+	 * the refund object before the creation hook fires.
+	 *
+	 * @param int $refund_id Identifier of the refund.
+	 * @return void
+	 */
+	private function mark_as_inbound( int $refund_id ): void {
+		$this->refund_meta[ $refund_id ][ Constants::INBOUND_REFUND_META_KEY ] = self::INBOUND_MARK;
+	}
 
 	/**
 	 * The listener under test, with a doubled payload builder and a doubled
@@ -684,6 +941,7 @@ final class OrderRefundedListenerTest extends TestCase {
 		$builder->shouldReceive( 'build' )->andReturnUsing(
 			function ( int $order_id ): string {
 				$this->built_for[] = $order_id;
+				$this->trace[]     = 'build:' . $order_id;
 
 				if ( null !== $this->build_failure ) {
 					throw $this->build_failure;
@@ -716,6 +974,7 @@ final class OrderRefundedListenerTest extends TestCase {
 				);
 
 				$this->enqueue_calls[] = $call;
+				$this->trace[]         = 'enqueue:' . $event_id;
 
 				if ( isset( $this->outbox_rows[ $event_id ] ) ) {
 					return;

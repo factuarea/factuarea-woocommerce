@@ -1,0 +1,15 @@
+{
+    "idempotency_key": "wc-catalog-20260919T100500Z-0002",
+    "items": [
+        {
+            "sku": "SKU-0001",
+            "name": "Blue enamel mug",
+            "price": "12.40"
+        },
+        {
+            "sku": "SKU-0002",
+            "price": "31.95",
+            "weight_grams": 480
+        }
+    ]
+}

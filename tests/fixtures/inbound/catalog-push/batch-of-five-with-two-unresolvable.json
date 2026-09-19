@@ -1,0 +1,33 @@
+{
+    "idempotency_key": "wc-catalog-20260919T100000Z-0001",
+    "items": [
+        {
+            "remote_id": "019e0000-0000-7000-8000-000000000101",
+            "sku": "SKU-0001",
+            "name": "Blue enamel mug",
+            "description": "<p>Half a litre, dishwasher safe.</p>",
+            "active": true,
+            "price": "12.40",
+            "available_quantity": 7
+        },
+        {
+            "sku": "SKU-0002",
+            "price": "31.95",
+            "available_quantity": 0
+        },
+        {
+            "sku": "SKU-0003",
+            "name": "Linen apron",
+            "active": false
+        },
+        {
+            "sku": "SKU-0004",
+            "price": "8.00"
+        },
+        {
+            "remote_id": "019e0000-0000-7000-8000-000000000105",
+            "sku": "SKU-0005",
+            "available_quantity": 42
+        }
+    ]
+}

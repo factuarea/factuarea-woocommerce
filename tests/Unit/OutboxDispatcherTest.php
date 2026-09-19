@@ -95,6 +95,14 @@ final class OutboxDispatcherTest extends TestCase {
 	private const SHOP_URL = 'https://shop.example.test';
 
 	/**
+	 * Identifier of this shop in Factuarea, as the merchant pasted it into the
+	 * settings screen. Opaque: nothing here parses it, and the assertions are
+	 * that it travels verbatim and that it comes from the setting and from
+	 * nowhere else.
+	 */
+	private const STORE_ID = '0192f4c3-6f2b-7a1e-9b6d-2c4f8a0b1d3e';
+
+	/**
 	 * Signing secret of this shop. Recognisable on sight, so that a sweep that
 	 * ever found it somewhere would name something a reader can search for.
 	 */
@@ -134,6 +142,20 @@ final class OutboxDispatcherTest extends TestCase {
 	 * @var array<int, int>
 	 */
 	private array $claim_limits = array();
+
+	/**
+	 * Every option the drain read, in order and with repetitions.
+	 *
+	 * It is recorded because «read once per run» is a property of the run and
+	 * not of the headers that came out of it: a dispatcher that read the option
+	 * inside the loop would send exactly the same deliveries and would only
+	 * show up as one `get_option` per entry, which on a shop draining hundreds
+	 * of entries a night is the difference nobody measures until it is a
+	 * support ticket about a slow scheduled task.
+	 *
+	 * @var array<int, string>
+	 */
+	private array $option_reads = array();
 
 	/**
 	 * Every settlement, in order.
@@ -190,9 +212,12 @@ final class OutboxDispatcherTest extends TestCase {
 		$this->requests     = array();
 		$this->answers      = array();
 		$this->unsettleable = array();
+		$this->option_reads = array();
 
 		Functions\when( 'get_option' )->alias(
 			function ( string $option, $default_value = false ) {
+				$this->option_reads[] = $option;
+
 				return $this->options[ $option ] ?? $default_value;
 			}
 		);
@@ -817,9 +842,16 @@ final class OutboxDispatcherTest extends TestCase {
 		 * The seven, in the order a native delivery sends them, at the head of
 		 * the set - and the transport's own content type as the ONE addition.
 		 * Asserted as a partition rather than as "the seven are in there
-		 * somewhere", because a delivery that grew an eighth header of ours
-		 * would stop being indistinguishable from a native one and nothing else
-		 * would notice.
+		 * somewhere", because a header of ours that appeared here unannounced
+		 * would stop the delivery being indistinguishable from a native one and
+		 * nothing else would notice.
+		 *
+		 * This installation has NO store identifier configured - the options of
+		 * `setUp` are the three the drain requires and no more - so the package
+		 * header is absent, which is the case this assertion pins: an
+		 * installation that never filled that field sends exactly what it sent
+		 * before the field existed. The configured case is the block on the
+		 * store identity below.
 		 */
 		$sent_headers = array_keys( $request['headers'] );
 
@@ -827,7 +859,8 @@ final class OutboxDispatcherTest extends TestCase {
 		$this->assertSame(
 			array( 'Content-Type' ),
 			array_slice( $sent_headers, 7 ),
-			'The transport labels the body as JSON; nothing else may be added to a delivery.'
+			'The transport labels the body as JSON; with no store identifier configured, nothing else may be '
+				. 'added to a delivery.'
 		);
 		$this->assertSame( self::SHOP_URL, $request['headers'][ Constants::HEADER_SOURCE ] );
 		$this->assertSame( OutboxDispatcher::DELIVERY_TOPIC, $request['headers'][ Constants::HEADER_TOPIC ] );
@@ -859,6 +892,214 @@ final class OutboxDispatcherTest extends TestCase {
 			( new DeliverySigner() )->sign( $request['body'], self::SIGNING_SECRET ),
 			$request['headers'][ Constants::HEADER_SIGNATURE ]
 		);
+	}
+
+	// ---------------------------------------------------------------------
+	// The store identity of the run.
+	// ---------------------------------------------------------------------
+
+	/**
+	 * The configured identifier is read ONCE for the whole run and travels in
+	 * EVERY delivery of it.
+	 *
+	 * Two properties, and they pull in opposite directions, which is why they
+	 * are asserted together: reading it per entry would be correct on the wire
+	 * and wasteful in the loop, and reading it once and passing it to only the
+	 * first delivery would be cheap and would leave the rest of a batch
+	 * unattributable. Three entries are drained because two would let an
+	 * off-by-one read-per-entry pass as "once and then again".
+	 *
+	 * @return void
+	 */
+	public function test_the_store_identifier_is_read_once_per_run_and_travels_in_every_delivery(): void {
+		$this->options[ Constants::OPTION_STORE_ID ] = self::STORE_ID;
+
+		$this->due = array(
+			$this->entry( array( 'id' => 17 ) ),
+			$this->entry( array( 'id' => 18 ) ),
+			$this->entry( array( 'id' => 19 ) ),
+		);
+
+		$this->answers = array( $this->answer( 200 ) );
+
+		$settled_entries = $this->dispatcher()->drain( 10 );
+
+		$this->assertSame( 3, $settled_entries );
+		$this->assertCount( 3, $this->requests );
+
+		$reads_of_the_identifier = count(
+			array_filter(
+				$this->option_reads,
+				static function ( string $option ): bool {
+					return Constants::OPTION_STORE_ID === $option;
+				}
+			)
+		);
+
+		$this->assertSame(
+			1,
+			$reads_of_the_identifier,
+			'The store identifier was not read exactly once for the whole run. It belongs to the installation '
+				. 'and not to the entry, so it is read where the origin address is read - once, before the loop '
+				. '- and a read per entry turns a nightly drain of hundreds of sales into hundreds of option '
+				. 'lookups that answer the same thing.'
+		);
+
+		foreach ( $this->requests as $position => $request ) {
+			$this->assertSame(
+				self::STORE_ID,
+				$request['headers'][ Constants::HEADER_STORE_ID ] ?? null,
+				sprintf(
+					'Delivery %d of the run does not carry the configured store identifier. Every delivery of '
+						. 'one run comes from one installation; a batch where only some entries are attributable '
+						. 'leaves the receiver guessing which company the rest invoice against.',
+					$position + 1
+				)
+			);
+
+			$this->assertSame(
+				Constants::DELIVERY_HEADERS,
+				array_slice( array_keys( $request['headers'] ), 0, 7 ),
+				sprintf( 'Delivery %d lost the seven native headers at the head of the set.', $position + 1 )
+			);
+
+			$this->assertSame(
+				array( Constants::HEADER_STORE_ID, 'Content-Type' ),
+				array_slice( array_keys( $request['headers'] ), 7 ),
+				sprintf(
+					'Delivery %d does not carry the store identifier as the eighth header, right after the '
+						. 'seven native ones and before the transport\'s own content type.',
+					$position + 1
+				)
+			);
+		}
+	}
+
+	/**
+	 * An identifier that is only whitespace is not an identifier.
+	 *
+	 * A merchant pasting from a browser brings the surrounding space with them,
+	 * and a field that ends up holding it is a field nobody filled in. Sending
+	 * the header anyway would put an empty identity on the wire, which the
+	 * other side has to decide what to do with - and "the store with the blank
+	 * identifier" is not a store.
+	 *
+	 * @return void
+	 */
+	public function test_a_blank_store_identifier_is_treated_as_no_identifier_at_all(): void {
+		$this->options[ Constants::OPTION_STORE_ID ] = "  \n\t ";
+
+		$this->answers = array( $this->answer( 200 ) );
+
+		$settled_entries = $this->dispatcher()->drain( 10 );
+
+		$this->assertSame( 1, $settled_entries, 'A blank identifier must not stop a delivery either.' );
+
+		$sent_headers = array_keys( $this->requests[0]['headers'] );
+
+		$this->assertSame( Constants::DELIVERY_HEADERS, array_slice( $sent_headers, 0, 7 ) );
+		$this->assertSame(
+			array( 'Content-Type' ),
+			array_slice( $sent_headers, 7 ),
+			'A store identifier that is only whitespace produced a header anyway.'
+		);
+	}
+
+	/**
+	 * The identifier changes NOTHING about what is delivered, how a rejection is
+	 * classified, or when the entry is tried again.
+	 *
+	 * The same retryable rejection is drained twice - once by an installation
+	 * with no identifier and once by one with it - and everything but the extra
+	 * header is compared between the two runs. The header is additive by
+	 * construction; what this asserts is that adding it did not quietly become
+	 * part of any decision, including the signature, which covers the body and
+	 * only the body.
+	 *
+	 * @return void
+	 */
+	public function test_the_store_identifier_changes_no_classification_and_no_retry_decision(): void {
+		list( $bare_settlement, $bare_request ) = $this->drain_a_retryable_rejection();
+
+		$this->assertArrayNotHasKey( Constants::HEADER_STORE_ID, $bare_request['headers'] );
+
+		$this->options[ Constants::OPTION_STORE_ID ] = self::STORE_ID;
+
+		list( $identified_settlement, $identified_request ) = $this->drain_a_retryable_rejection();
+
+		$this->assertSame( self::STORE_ID, $identified_request['headers'][ Constants::HEADER_STORE_ID ] );
+
+		/*
+		 * `assertEquals` and not `assertSame`: the two outcomes are distinct
+		 * instances of a readonly value object produced by two runs, so what is
+		 * being compared is every field of the verdict - kind, status code,
+		 * rejection code, declared wait and merchant message - and not object
+		 * identity, which could never hold here.
+		 */
+		$this->assertEquals(
+			$bare_settlement['outcome'],
+			$identified_settlement['outcome'],
+			'The classifier reached a different verdict on the same answer because the delivery carried a store '
+				. 'identifier. The classifier reads the response; the header is on the request.'
+		);
+
+		$this->assertSame(
+			$bare_settlement['next_attempt_at'],
+			$identified_settlement['next_attempt_at'],
+			'The same rejection was rescheduled for a different instant once the store identifier travelled. '
+				. 'The retry decision is the attempt number, the clock and what the receiver declared; the '
+				. 'identity of the shop is none of those.'
+		);
+
+		$this->assertSame( $bare_request['url'], $identified_request['url'] );
+		$this->assertSame( $bare_request['body'], $identified_request['body'] );
+
+		$this->assertSame(
+			$bare_request['headers'][ Constants::HEADER_SIGNATURE ],
+			$identified_request['headers'][ Constants::HEADER_SIGNATURE ],
+			'The signature changed when the store identifier was configured. It covers the body and only the '
+				. 'body: a signature that depended on a header would stop validating at a receiver that reads '
+				. 'the body, and the failure is a 401 that looks exactly like a wrong secret.'
+		);
+
+		$this->assertSame(
+			array_slice( $bare_request['headers'], 0, 7, true ),
+			array_slice( $identified_request['headers'], 0, 7, true ),
+			'The seven native headers are no longer identical - in name, in value and in order - between an '
+				. 'installation with a store identifier and one without.'
+		);
+	}
+
+	/**
+	 * Drains one entry against a retryable rejection with a declared wait, and
+	 * hands back its settlement and the request that produced it.
+	 *
+	 * The state the run reads and writes is reset here rather than in the
+	 * caller, so that the two runs of the comparison above start from the same
+	 * place: the doubled outbox increments the attempt counter of the entry it
+	 * settles, and a second run against the incremented one would be planning a
+	 * different attempt.
+	 *
+	 * @return array{0: array{id: int, outcome: DeliveryOutcome, next_attempt_at: int|null}, 1: array{url: string, headers: array<string, string>, body: string}}
+	 */
+	private function drain_a_retryable_rejection(): array {
+		$this->due      = array( $this->entry() );
+		$this->settled  = array();
+		$this->requests = array();
+		$this->answers  = array(
+			$this->answer(
+				429,
+				$this->rejection_body( 'ingestion_burst', true, 90, 'Demasiadas entregas seguidas.' ),
+				array( 'Retry-After' => '90' )
+			),
+		);
+
+		$this->dispatcher()->drain( 10 );
+
+		$this->assertCount( 1, $this->settled, 'Exactly one entry should have been settled.' );
+		$this->assertCount( 1, $this->requests, 'Exactly one request should have been made.' );
+
+		return array( $this->settled[0], $this->requests[0] );
 	}
 
 	// ---------------------------------------------------------------------

@@ -29,22 +29,31 @@ const { MOCK_TOKEN, MOCK_ROOT } = require( './support/site' );
  * needing something newer than it advertises.
  *
  * The three can be overridden by environment, and that exists for exactly one
- * job: `readme.txt` carries a `Tested up to` line, which is a claim made to
- * strangers about a WordPress this suite does NOT pin. `docs/publishing.md`
- * forbids raising that number without running the suite against it, and before
- * these overrides existed "running it" meant editing two files by hand and
- * remembering to put them back - a procedure nobody performs twice the same
- * way. Now it is:
+ * job: `readme.txt` carries `Tested up to` and `WC tested up to` lines, which
+ * are claims made to strangers about versions this suite does NOT pin.
+ * `docs/publishing.md` forbids raising either without running the suite against
+ * it, and before these overrides existed "running it" meant editing pinned
+ * files by hand and remembering to put them back - a procedure nobody performs
+ * twice the same way. Now it is:
  *
- *     echo '{ "core": "https://wordpress.org/wordpress-<x.y>.zip" }' > .wp-env.override.json
+ *     eval "$( php scripts/check-tested-up-to.php --emit | sed 's/^/export /' )"
+ *     node tests/e2e/declared-pair.js
  *     npm run e2e:down && npx wp-env destroy && npm run e2e:up
- *     FACTUAREA_E2E_WORDPRESS=<x.y> npm run e2e
- *     rm .wp-env.override.json
+ *     npm run e2e
+ *     node tests/e2e/declared-pair.js --remove
  *
- * The guard is not weakened by this: it still refuses a site that is not the
- * one DECLARED, and the run still prints the three versions it actually found,
- * which is the evidence the claim rests on. What changes is that the declaration
- * can be made on the command line instead of in a commit.
+ * WRITING THAT OVERRIDE BY HAND IS THE TRAP, which is why there is a script for
+ * it. wp-env merges the override by top-level key and an array REPLACES rather
+ * than extends, so an override naming only `core` leaves the `plugins` array of
+ * `.wp-env.json` in place while an override naming WooCommerce silently drops
+ * the working tree - starting a WordPress with no plugin under test at all. And
+ * `WC tested up to` is a SERIES, which the plugin directory does not publish as
+ * a download: the release inside it has to be resolved, never typed.
+ *
+ * The guard is not weakened by any of this: it still refuses a site that is not
+ * the one DECLARED, and the run still prints the three versions it actually
+ * found, which is the evidence the claim rests on. What changes is that the
+ * declaration can be made on the command line instead of in a commit.
  */
 const EXPECTED = {
 	wordpress: process.env.FACTUAREA_E2E_WORDPRESS || '6.5',

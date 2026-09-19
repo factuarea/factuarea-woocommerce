@@ -46,6 +46,18 @@ use ReflectionClass;
  * enumerated list, and reading an option value on its way to deleting it, which
  * is how a credential ends up somewhere it can be seen.
  *
+ * THE DATABASE IS REACHED ON PURPOSE NOW, SO THE CHECKS ARE ABOUT ITS SHAPE.
+ *
+ * The file used to be forbidden from naming `$wpdb` at all, which was a cheap
+ * and complete guarantee while it had no table of its own to remove. The
+ * inbound delivery ledger changed that: it is the plugin's deduplication
+ * bookkeeping, it is dropped, and dropping a table is the one thing no
+ * WordPress API does for you. So the blanket ban is gone and three narrower
+ * checks stand in its place - the file may name no table but its own, it may
+ * send no statement but the drop, and that statement must be written whole
+ * instead of assembled - each of which says what the ban used to say about the
+ * only case that mattered, and says it where a reader can see why.
+ *
  * THE COVERAGE HALF IS THE ONE THAT WILL FAIL ON SOMEBODY ELSE'S CODE.
  *
  * An uninstall routine deletes the list it was given; it has no way to know
@@ -75,9 +87,10 @@ final class UninstallTest extends TestCase {
 		'Filter name published by the classic checkout field, not a stored option' => array(
 			'factuarea_wc_classic_additional_fields_version',
 		),
-		'Settings API identifiers of the settings screen: the group the options are registered against, the single section of the screen, and the two admin-post actions - the one that generates the signing secret and the one that runs the connection test. None is stored; the options they organise are Constants::OPTION_* and are deleted' => array(
+		'Settings API identifiers of the settings screen: the group the options are registered against, its TWO sections - what this shop sends, and what it agrees to be told - and the two admin-post actions, the one that generates the signing secret and the one that runs the connection test. None is stored; a section identifier is what `add_settings_section` groups fields under and never reaches the options table. The options they organise are Constants::OPTION_* and are deleted' => array(
 			'factuarea_wc_connection',
 			'factuarea_wc_generate_signing_secret',
+			'factuarea_wc_receivers',
 			'factuarea_wc_settings',
 			'factuarea_wc_test_connection',
 		),
@@ -111,6 +124,9 @@ final class UninstallTest extends TestCase {
 		'Private forwarder of the settings screen whose two callers both pass a Constants::OPTION_* already in the deleted list' => array(
 			'src/Admin/SettingsPage.php [get_option($option)]',
 		),
+		'Option of WOOCOMMERCE, not of this plugin, read through a private constant of the class. `defined()` cannot see a private class constant from outside, which is why the name arrives here unreadable rather than resolved. Looked at on 2026-09-18: `StockWriter::NO_STOCK_THRESHOLD_OPTION` is `woocommerce_notify_no_stock_amount`, the threshold WooCommerce itself stores and the writer only READS, to decide whether an assigned quantity leaves an item out of stock. This plugin never writes it. IT MUST NEVER BE ADDED TO Constants::ALL_OPTIONS: deleting it on uninstall would remove a WooCommerce setting the merchant configured and this plugin never created' => array(
+			'src/Inbound/StockWriter.php [get_option(self::NO_STOCK_THRESHOLD_OPTION)]',
+		),
 	);
 
 	/**
@@ -140,8 +156,8 @@ final class UninstallTest extends TestCase {
 	 * @var array<string, string>
 	 */
 	private const FORBIDDEN_CODE_TOKENS = array(
-		'wpdb'               => 'a direct database access during uninstall is how a table gets dropped or options get matched by prefix',
-		'delete_post_meta'   => 'the tax identifier on an order is the merchant accounting record, not the plugin state',
+		'OUTBOX_TABLE'       => 'the outbox is the merchant record of which sales reached Factuarea, and naming its table here is one keyword away from dropping it. The inbound delivery table is the only table this file may touch',
+		'delete_post_meta'   => 'the tax identifier and the fulfilment data on an order are the merchant accounting record, not the plugin state',
 		'delete_metadata'    => 'same reason as delete_post_meta, one layer down',
 		'delete_user_meta'   => 'the plugin stores nothing on a user, so a call here could only be destroying somebody else data',
 		'delete_site_option' => 'the plugin registers no network option, so this could only delete something another plugin created',
@@ -151,14 +167,36 @@ final class UninstallTest extends TestCase {
 	);
 
 	/**
+	 * SQL verbs that change or read data, and what each one would mean in a
+	 * file whose entire database business is dropping ONE table it created.
+	 *
+	 * `DROP` is absent on purpose: it is the one statement this file is allowed
+	 * to send, and `test_the_only_statement_of_the_uninstall_is_the_inbound_drop`
+	 * reads that statement whole instead of forbidding the word.
+	 *
+	 * @var array<string, string>
+	 */
+	private const FORBIDDEN_SQL_VERBS = array(
+		'DELETE'   => 'rows are deleted by the WordPress option API here, never by a statement of this file',
+		'TRUNCATE' => 'emptying a table during an uninstall destroys merchant data without even leaving the table gone',
+		'ALTER'    => 'an uninstall has nothing to migrate: the plugin is being removed, not upgraded',
+		'UPDATE'   => 'nothing is edited on the way out; what leaves, leaves whole',
+		'INSERT'   => 'the last thing this plugin does is not writing a row',
+		'SELECT'   => 'reading is how an option value ends up in a variable, and two of them are credentials',
+		'SHOW'     => 'asking whether the table is there is what IF EXISTS is for, and it costs one round trip instead of two',
+	);
+
+	/**
 	 * The child process reports what the WordPress doubles were asked to do.
 	 *
-	 * @param bool $uninstall_context Whether WP_UNINSTALL_PLUGIN is defined.
-	 * @param bool $multisite         Whether is_multisite() answers true.
+	 * @param bool   $uninstall_context Whether WP_UNINSTALL_PLUGIN is defined.
+	 * @param bool   $multisite         Whether is_multisite() answers true.
+	 * @param string $prefix            Table prefix of the installation, which is
+	 *                                  deliberately NOT `wp_` in most cases here.
 	 *
-	 * @return array{deleted: list<string>, forbidden: list<string>, restored: int, switched: list<int>, get_sites_args: array<string, mixed>}
+	 * @return array{deleted: list<string>, queries: list<string>, forbidden: list<string>, restored: int, switched: list<int>, get_sites_args: array<string, mixed>}
 	 */
-	private function run_uninstall( bool $uninstall_context, bool $multisite ): array {
+	private function run_uninstall( bool $uninstall_context, bool $multisite, string $prefix = 'wp_' ): array {
 		if ( ! is_string( PHP_BINARY ) || '' === PHP_BINARY || ! is_executable( PHP_BINARY ) ) {
 			$this->markTestSkipped(
 				'SKIPPED, not passed: the uninstall file has to be included in a child process to be exercised with and '
@@ -181,6 +219,7 @@ final class UninstallTest extends TestCase {
 				'FACTUAREA_HARNESS_UNINSTALL' => $this->repository_path( 'uninstall.php' ),
 				'FACTUAREA_HARNESS_CONTEXT'   => $uninstall_context ? '1' : '0',
 				'FACTUAREA_HARNESS_MULTISITE' => $multisite ? '1' : '0',
+				'FACTUAREA_HARNESS_PREFIX'    => $prefix,
 			)
 		);
 
@@ -240,6 +279,7 @@ final class UninstallTest extends TestCase {
 
 $GLOBALS['factuarea_report'] = array(
 	'deleted'        => array(),
+	'queries'        => array(),
 	'forbidden'      => array(),
 	'restored'       => 0,
 	'switched'       => array(),
@@ -323,21 +363,73 @@ function get_sites( $args = array() ) {
 function switch_to_blog( $blog_id ) {
 	$GLOBALS['factuarea_report']['blog']       = (int) $blog_id;
 	$GLOBALS['factuarea_report']['switched'][] = (int) $blog_id;
+
+	/*
+	 * What WordPress actually does to $wpdb, because it is the half of
+	 * switch_to_blog() this file depends on: the table prefix becomes that
+	 * site's prefix - the base one for the first site of the network, the base
+	 * one with the site id in it for every other - and it is why a table name
+	 * composed before the walk would name the wrong table on every site but one.
+	 */
+	$GLOBALS['wpdb']->prefix = 1 === (int) $blog_id
+		? $GLOBALS['wpdb']->base_prefix
+		: $GLOBALS['wpdb']->base_prefix . (int) $blog_id . '_';
+
 	return true;
 }
 
 function restore_current_blog() {
 	++$GLOBALS['factuarea_report']['restored'];
 	$GLOBALS['factuarea_report']['blog'] = 0;
+	$GLOBALS['wpdb']->prefix             = $GLOBALS['wpdb']->base_prefix;
 	return true;
 }
 
 class Factuarea_Harness_Wpdb {
-	public $prefix = 'wp_';
+	public $prefix;
+
+	public $base_prefix;
+
+	public function __construct( string $prefix ) {
+		$this->prefix      = $prefix;
+		$this->base_prefix = $prefix;
+	}
 
 	public function query( $sql ) {
-		factuarea_harness_forbidden( 'wpdb::query' );
+		$GLOBALS['factuarea_report']['queries'][] = $GLOBALS['factuarea_report']['blog'] . '|' . $sql;
 		return 0;
+	}
+
+	/*
+	 * A stand-in for the placeholder expansion, not a stand-in for the escaping.
+	 * `%i` is the one that matters here: WordPress quotes an identifier with
+	 * backticks and doubles any backtick inside it, and reproducing that is what
+	 * lets the test read the statement exactly as the database would receive it.
+	 */
+	public function prepare( $sql, ...$arguments ) {
+		$values = $arguments;
+
+		return preg_replace_callback(
+			'/%[idfs]/',
+			static function ( array $match ) use ( &$values ) {
+				$value = array_shift( $values );
+
+				if ( '%i' === $match[0] ) {
+					return '`' . str_replace( '`', '``', (string) $value ) . '`';
+				}
+
+				if ( '%d' === $match[0] ) {
+					return (string) (int) $value;
+				}
+
+				if ( '%f' === $match[0] ) {
+					return (string) (float) $value;
+				}
+
+				return "'" . addslashes( (string) $value ) . "'";
+			},
+			(string) $sql
+		);
 	}
 
 	public function get_results( $sql, $output = null ) {
@@ -350,9 +442,29 @@ class Factuarea_Harness_Wpdb {
 		return array();
 	}
 
-	public function prepare( $sql, ...$arguments ) {
-		factuarea_harness_forbidden( 'wpdb::prepare' );
-		return $sql;
+	public function get_var( $sql ) {
+		factuarea_harness_forbidden( 'wpdb::get_var' );
+		return null;
+	}
+
+	public function get_row( $sql, $output = null ) {
+		factuarea_harness_forbidden( 'wpdb::get_row' );
+		return null;
+	}
+
+	public function insert( $table, $data, $format = null ) {
+		factuarea_harness_forbidden( 'wpdb::insert' );
+		return false;
+	}
+
+	public function update( $table, $data, $where, $format = null, $where_format = null ) {
+		factuarea_harness_forbidden( 'wpdb::update' );
+		return false;
+	}
+
+	public function delete( $table, $where, $where_format = null ) {
+		factuarea_harness_forbidden( 'wpdb::delete' );
+		return false;
 	}
 
 	public function esc_like( $text ) {
@@ -361,7 +473,9 @@ class Factuarea_Harness_Wpdb {
 	}
 }
 
-$GLOBALS['wpdb'] = new Factuarea_Harness_Wpdb();
+$factuarea_harness_prefix = (string) getenv( 'FACTUAREA_HARNESS_PREFIX' );
+
+$GLOBALS['wpdb'] = new Factuarea_Harness_Wpdb( '' === $factuarea_harness_prefix ? 'wp_' : $factuarea_harness_prefix );
 
 if ( '1' === getenv( 'FACTUAREA_HARNESS_CONTEXT' ) ) {
 	define( 'WP_UNINSTALL_PLUGIN', 'factuarea-for-woocommerce/factuarea-for-woocommerce.php' );
@@ -796,6 +910,59 @@ PHP;
 	}
 
 	/**
+	 * The entries of a report list, grouped by the site they happened on.
+	 *
+	 * Both lists the harness records - the options it deleted and the
+	 * statements it sent - carry the site in front of the value, because on a
+	 * network the question is never "did it happen" but "did it happen on every
+	 * site".
+	 *
+	 * @param list<string> $entries Entries shaped `site|value`.
+	 *
+	 * @return array<int, list<string>>
+	 */
+	private function by_site( array $entries ): array {
+		$grouped = array();
+
+		foreach ( $entries as $entry ) {
+			list( $site, $value ) = explode( '|', $entry, 2 );
+
+			$grouped[ (int) $site ][] = $value;
+		}
+
+		return $grouped;
+	}
+
+	/**
+	 * Every statement the uninstall sent to the database, in order, without the
+	 * site they were sent on.
+	 *
+	 * @param array{queries: list<string>} $report Harness report.
+	 *
+	 * @return list<string>
+	 */
+	private function statements( array $report ): array {
+		return array_map(
+			static fn( string $entry ): string => explode( '|', $entry, 2 )[1],
+			$report['queries']
+		);
+	}
+
+	/**
+	 * Every option name the uninstall deleted, without the site it happened on.
+	 *
+	 * @param array{deleted: list<string>} $report Harness report.
+	 *
+	 * @return list<string>
+	 */
+	private function deleted_option_names( array $report ): array {
+		return array_map(
+			static fn( string $entry ): string => explode( '|', $entry, 2 )[1],
+			$report['deleted']
+		);
+	}
+
+	/**
 	 * The entries of a by-design list, without their reasons.
 	 *
 	 * @param array<string, list<string>> $by_design Reason to entries.
@@ -888,6 +1055,12 @@ PHP;
 		);
 		$this->assertSame(
 			array(),
+			$report['queries'],
+			'The uninstall routine dropped the inbound delivery table although WP_UNINSTALL_PLUGIN was not defined, so '
+			. 'a stray include of this file would make a working installation forget every delivery it has applied.'
+		);
+		$this->assertSame(
+			array(),
 			$report['forbidden'],
 			'The uninstall routine did something although WP_UNINSTALL_PLUGIN was not defined: '
 			. implode( ', ', $report['forbidden'] )
@@ -928,14 +1101,49 @@ PHP;
 	}
 
 	/**
+	 * Every meta key the frozen contract declares, read off the contract itself
+	 * rather than copied here.
+	 *
+	 * Copying the list would make this check describe the plugin as it was the
+	 * day somebody typed it: the inbound half added nine keys to the contract,
+	 * and a copied list would have kept asserting about the four it knew. The
+	 * reflection asks the contract what it currently declares, so a key added
+	 * tomorrow is covered the moment it is declared.
+	 *
+	 * @return array<string, string> Constant name to the meta key it holds.
+	 */
+	private function order_meta_keys_of_the_contract(): array {
+		$keys = array();
+
+		foreach ( ( new ReflectionClass( Constants::class ) )->getConstants() as $name => $value ) {
+			if ( ! str_ends_with( $name, '_META_KEY' ) || ! is_string( $value ) || '' === $value ) {
+				continue;
+			}
+
+			$keys[ $name ] = $value;
+		}
+
+		ksort( $keys );
+
+		return $keys;
+	}
+
+	/**
 	 * The merchant's business records survive, and the file cannot even reach
 	 * them.
 	 *
-	 * The orders keep their tax identifier and the outbox keeps its rows: they
-	 * are the merchant accounting record and the merchant delivery history, and
-	 * removing an integration is not a request to alter either. The check is on
-	 * the source rather than on behaviour because dropping a table succeeds
-	 * quietly, and quietly is how it would ship.
+	 * The orders keep everything the plugin ever wrote on them - the tax
+	 * identifier, the correlated invoice identifier, and everything the inbound
+	 * half added: the fulfilment status, its tracking data, the mark of an
+	 * inbound refund, the corrective reference and the refund scope - and the
+	 * outbox keeps its rows. They are the merchant accounting record and the
+	 * merchant delivery history, and removing an integration is not a request to
+	 * alter either. The one table that does go is the inbound delivery ledger,
+	 * which holds no merchant data at all and has its own tests below.
+	 *
+	 * The check is on the source rather than on behaviour because deleting an
+	 * order meta or dropping a table succeeds quietly, and quietly is how it
+	 * would ship.
 	 *
 	 * @return void
 	 */
@@ -960,14 +1168,34 @@ PHP;
 			);
 		}
 
-		$code = implode( ' ', $words );
+		$code       = implode( ' ', $words );
+		$order_meta = $this->order_meta_keys_of_the_contract();
 
-		foreach ( array( Constants::OUTBOX_TABLE, Constants::TAX_ID_META_KEY, Constants::TAX_ID_MIRROR_META_KEY, Constants::IDEMPOTENCY_KEY_META_KEY, Constants::INVOICE_ID_META_KEY ) as $merchant_datum ) {
+		/*
+		 * The sweep below proves nothing against an empty set, and an empty set
+		 * is exactly what a renamed constant would produce. These four are named
+		 * so that the reflection has to keep finding the contract it is reading:
+		 * one from the outgoing half, three from the inbound one.
+		 */
+		foreach ( array( 'TAX_ID_META_KEY', 'FULFILMENT_STATUS_META_KEY', 'TRACKING_NUMBER_META_KEY', 'INBOUND_REFUND_META_KEY' ) as $expected_constant ) {
+			$this->assertArrayHasKey(
+				$expected_constant,
+				$order_meta,
+				"Constants::{$expected_constant} is no longer a meta key of the frozen contract, so this check stopped "
+				. 'covering it. Either the constant was renamed - update the four named here - or the plugin stopped '
+				. 'writing that datum on the order.'
+			);
+		}
+
+		$untouchable = array_merge( array( 'OUTBOX_TABLE' => Constants::OUTBOX_TABLE ), $order_meta );
+
+		foreach ( $untouchable as $constant_name => $merchant_datum ) {
 			$this->assertStringNotContainsString(
 				strtolower( $merchant_datum ),
 				$code,
-				"uninstall.php names `{$merchant_datum}` in code. The orders and the outbox belong to the merchant and "
-				. 'outlive the plugin; only the connection is being removed.'
+				"uninstall.php names `{$merchant_datum}` (Constants::{$constant_name}) in code. The orders and the outbox "
+				. 'belong to the merchant and outlive the plugin; only the connection, and the plugin bookkeeping that '
+				. 'serves it, are being removed.'
 			);
 		}
 	}
@@ -1010,6 +1238,174 @@ PHP;
 			$code,
 			'uninstall.php does not read Constants::ALL_OPTIONS, so whatever it deletes is a second list that will '
 			. 'diverge from the first one.'
+		);
+	}
+
+	/**
+	 * The options the inbound half brought with it are deleted like every other
+	 * one, by being in the list rather than by anything written here.
+	 *
+	 * The three of them are the two switches that govern the receivers and the
+	 * schema marker of the inbound delivery table. A switch left behind is the
+	 * one that decides whether a receiver accepts deliveries, and it would
+	 * survive a reinstall carrying the answer somebody gave months earlier; the
+	 * schema marker left behind would claim a table that this very uninstall
+	 * drops.
+	 *
+	 * @return void
+	 */
+	public function test_the_options_the_inbound_half_added_are_deleted_like_the_rest(): void {
+		$inbound_options = array(
+			'OPTION_ORDER_STATUS_RECEIVER_ENABLED' => Constants::OPTION_ORDER_STATUS_RECEIVER_ENABLED,
+			'OPTION_CATALOG_PUSH_RECEIVER_ENABLED' => Constants::OPTION_CATALOG_PUSH_RECEIVER_ENABLED,
+			'OPTION_INBOUND_SCHEMA_VERSION'        => Constants::OPTION_INBOUND_SCHEMA_VERSION,
+		);
+
+		foreach ( $inbound_options as $constant_name => $option ) {
+			$this->assertContains(
+				$option,
+				Constants::ALL_OPTIONS,
+				"Constants::{$constant_name} is not in Constants::ALL_OPTIONS, so the uninstall walk never reaches it "
+				. 'and the option stays in the merchant database for good.'
+			);
+		}
+
+		$deleted = $this->deleted_option_names( $this->run_uninstall( true, false ) );
+
+		foreach ( $inbound_options as $constant_name => $option ) {
+			$this->assertContains(
+				$option,
+				$deleted,
+				"The uninstall did not delete {$option} (Constants::{$constant_name})."
+			);
+		}
+	}
+
+	/**
+	 * The inbound delivery table is dropped, and its name is built with the
+	 * prefix of the installation the uninstall is running on.
+	 *
+	 * The prefix is the whole point of the test and the reason it is not `wp_`.
+	 * Most installations that were ever migrated between hosts chose another
+	 * one, and a hard-coded `wp_` would drop nothing on them - or, worse, drop
+	 * the table of a DIFFERENT installation sharing the database, which is how
+	 * several shops are hosted on one plan.
+	 *
+	 * @return void
+	 */
+	public function test_uninstall_drops_the_inbound_delivery_table_with_the_prefix_of_the_installation(): void {
+		$report     = $this->run_uninstall( true, false, 'shop7_' );
+		$statements = $this->statements( $report );
+
+		$this->assertCount(
+			1,
+			$statements,
+			'The uninstall sent ' . count( $statements ) . ' statements to the database. It has exactly one piece of '
+			. "database business - dropping its own delivery ledger - and the statements were:\n  "
+			. implode( "\n  ", $statements )
+		);
+
+		$this->assertMatchesRegularExpression(
+			'/^DROP TABLE IF EXISTS `?' . preg_quote( 'shop7_' . Constants::INBOUND_TABLE, '/' ) . '`?$/',
+			$statements[0],
+			'The uninstall did not drop the inbound delivery table of this installation. `IF EXISTS` is what makes it '
+			. 'safe on a site that never activated the inbound half, and the prefix has to be the one of the '
+			. "installation rather than a hard-coded `wp_`. The statement was:\n  " . $statements[0]
+		);
+
+		$this->assertStringNotContainsString(
+			'wp_' . Constants::INBOUND_TABLE,
+			$statements[0],
+			'The uninstall built the table name with a hard-coded `wp_` prefix, so on this installation it dropped a '
+			. 'table belonging to somebody else and left its own behind.'
+		);
+	}
+
+	/**
+	 * Whatever the uninstall sends to the database is the drop of its own
+	 * ledger, and nothing else - on a single site and on a network alike.
+	 *
+	 * The test above reads one statement built from one literal. This one reads
+	 * EVERY statement that actually left, which is the only way to catch a
+	 * statement assembled out of pieces: a literal check cannot see a name that
+	 * was concatenated, and the outbox table is one concatenation away from any
+	 * file that already holds `$wpdb`.
+	 *
+	 * @return void
+	 */
+	public function test_the_uninstall_sends_nothing_but_the_drop_of_its_own_ledger(): void {
+		$statements = array_merge(
+			$this->statements( $this->run_uninstall( true, false, 'shop7_' ) ),
+			$this->statements( $this->run_uninstall( true, true, 'net_' ) )
+		);
+
+		$this->assertNotSame(
+			array(),
+			$statements,
+			'The uninstall sent no statement at all, so this check proves nothing: the inbound delivery table would '
+			. 'have survived the deletion too.'
+		);
+
+		foreach ( $statements as $statement ) {
+			$this->assertStringContainsString(
+				Constants::INBOUND_TABLE,
+				$statement,
+				"The uninstall sent a statement that is not about its own delivery ledger:\n  {$statement}"
+			);
+
+			$this->assertStringNotContainsString(
+				Constants::OUTBOX_TABLE,
+				$statement,
+				"The uninstall named the outbox table in a statement:\n  {$statement}\n\nThe outbox holds which sales "
+				. 'reached Factuarea and which ones never did. It is the merchant record and it outlives the plugin; '
+				. 'the inbound ledger is deduplication bookkeeping and goes with it.'
+			);
+
+			foreach ( self::FORBIDDEN_SQL_VERBS as $verb => $consequence ) {
+				$this->assertDoesNotMatchRegularExpression(
+					'/\b' . $verb . '\b/i',
+					$statement,
+					"The uninstall sent a statement containing `{$verb}`: {$consequence}.\n  {$statement}"
+				);
+			}
+		}
+	}
+
+	/**
+	 * Read in the source, the file contains exactly ONE statement, written whole
+	 * as a literal.
+	 *
+	 * A statement assembled out of pieces cannot be read by anybody auditing
+	 * this file, and it is the shape every accidental deletion takes: a name
+	 * concatenated from a variable that turns out to hold something else. The
+	 * placeholder is the only thing that varies, and WordPress is what fills it.
+	 *
+	 * @return void
+	 */
+	public function test_the_only_statement_written_in_the_uninstall_is_the_inbound_drop(): void {
+		$literals = array();
+
+		foreach ( $this->code_tokens( $this->repository_path( 'uninstall.php' ) ) as $token ) {
+			if ( is_array( $token ) && T_CONSTANT_ENCAPSED_STRING === $token[0] ) {
+				$literals[] = substr( $token[1], 1, -1 );
+			}
+		}
+
+		$statements = array();
+		foreach ( $literals as $literal ) {
+			if ( 1 === preg_match( '/\b(DROP|DELETE|TRUNCATE|ALTER|UPDATE|INSERT|SELECT|SHOW|CREATE|REPLACE|GRANT)\b/i', $literal ) ) {
+				$statements[] = $literal;
+			}
+		}
+
+		$this->assertSame(
+			array( 'DROP TABLE IF EXISTS %i' ),
+			$statements,
+			"uninstall.php does not contain exactly one statement, written whole. What it contains is:\n  "
+			. implode( "\n  ", $statements )
+			. "\n\n`%i` is the identifier placeholder, so the table name is quoted by WordPress instead of being "
+			. 'interpolated by hand, and `IF EXISTS` is what makes the drop safe on an installation whose table was '
+			. 'never created.'
 		);
 	}
 
@@ -1261,10 +1657,16 @@ PHP;
 	 * secret of every other store stay in the database - the exact outcome the
 	 * file exists to prevent, only harder to notice.
 	 *
+	 * The inbound delivery table is per site for the same reason, and it is the
+	 * harder half to get right: each site has its own table because each site
+	 * has its own prefix, and `$wpdb->prefix` only becomes that site's prefix
+	 * after `switch_to_blog`. A name composed once, before the walk, would drop
+	 * the first site's table three times and leave the other two standing.
+	 *
 	 * @return void
 	 */
 	public function test_uninstall_clears_every_site_of_a_multisite_network(): void {
-		$report = $this->run_uninstall( true, true );
+		$report = $this->run_uninstall( true, true, 'net_' );
 
 		$this->assertSame(
 			array( 1, 4, 9 ),
@@ -1278,11 +1680,7 @@ PHP;
 			. 'site nobody asked for.'
 		);
 
-		$per_site = array();
-		foreach ( $report['deleted'] as $entry ) {
-			list( $blog, $option ) = explode( '|', $entry, 2 );
-			$per_site[ (int) $blog ][] = $option;
-		}
+		$per_site = $this->by_site( $report['deleted'] );
 
 		$expected = Constants::ALL_OPTIONS;
 		sort( $expected );
@@ -1307,5 +1705,35 @@ PHP;
 			'The site list is fetched with the default page size, so a network larger than that page keeps the '
 			. 'credentials of every site past it.'
 		);
+
+		$per_site_statements = $this->by_site( $report['queries'] );
+
+		$this->assertSame(
+			array( 1, 4, 9 ),
+			array_keys( $per_site_statements ),
+			'The inbound delivery table was dropped on the wrong set of sites.'
+		);
+
+		/*
+		 * What WordPress names a site's tables: the base prefix for the first
+		 * site of the network, the base prefix with the site id in it for every
+		 * other one.
+		 */
+		$expected_tables = array(
+			1 => 'net_' . Constants::INBOUND_TABLE,
+			4 => 'net_4_' . Constants::INBOUND_TABLE,
+			9 => 'net_9_' . Constants::INBOUND_TABLE,
+		);
+
+		foreach ( $per_site_statements as $site => $statements ) {
+			$this->assertCount( 1, $statements, "Site {$site} received more than the one drop of its own ledger." );
+
+			$this->assertMatchesRegularExpression(
+				'/^DROP TABLE IF EXISTS `?' . preg_quote( $expected_tables[ $site ], '/' ) . '`?$/',
+				$statements[0],
+				"Site {$site} did not lose its own inbound delivery table. Its table is "
+				. "`{$expected_tables[ $site ]}`, and what was dropped was:\n  {$statements[0]}"
+			);
+		}
 	}
 }
