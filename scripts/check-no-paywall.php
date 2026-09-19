@@ -49,8 +49,47 @@ declare( strict_types = 1 );
  *    actually ships.
  *
  * 3. PACKAGING. The artefact that would be published carries the plugin, its
- *    licence and nothing else: no tests, no scripts, no development
- *    documentation, no developer tooling and no installed dependency tree.
+ *    licence and its directory listing, and nothing else: no tests, no
+ *    scripts, no development documentation, no developer tooling and no
+ *    installed dependency tree.
+ *
+ * ---------------------------------------------------------------------------
+ * THE TWO RECEIVER TOGGLES, AND WHY THEY ARE NOT WHAT THIS GATE LOOKS FOR
+ * ---------------------------------------------------------------------------
+ * The inbound half is the first thing this plugin ever put a condition in
+ * front of. Two settings - `factuarea_wc_order_status_receiver_enabled` and
+ * `factuarea_wc_catalog_push_receiver_enabled` - decide whether each receiver
+ * answers at all, and both start switched OFF, so a fresh installation accepts
+ * nothing until the merchant says so.
+ *
+ * That is not a paywall and this gate must not report it. The distinction is
+ * not "how many conditions" but WHO the condition belongs to: the merchant
+ * owns a setting of their own shop, switches it on by clicking a checkbox and
+ * pays nobody for the privilege. A paywall is a condition owned by the seller,
+ * which the merchant can only satisfy with money. Defaulting to off is the
+ * opposite of withholding: an endpoint that accepted signed deliveries the
+ * moment the plugin was installed would be a security decision made on the
+ * merchant's behalf.
+ *
+ * What the vocabulary grew for is the version of the same code where the
+ * condition changes hands. MEASURED on 2026-09-18 against a fixture written as
+ * somebody would actually write it - `tests/fixtures/no-paywall/gated-receiver.php`
+ * - the vocabulary as it stood caught the licence key, the plan level, the paid
+ * tier and the three sentences, and MISSED four conditions: the subscription
+ * the receiver consults, the entitlement beside it, the function asking whether
+ * the plan allows the inbound half, and the answer naming the payment as the
+ * reason. Its clean twin, `ungated-receiver.php`, is the same receiver behind
+ * the merchant toggle, and it carries the near misses - `is_paid()`, the word
+ * `subscription` on its own, `planner`, `processing`, `unlocked` - in CODE and
+ * not in a docblock, because the scanner drops comments before it matches and
+ * a near miss parked in prose proves nothing.
+ *
+ * One shape is deliberately NOT a pattern: the bare status code of a payment
+ * demand. The scanner matches one token at a time, so the key and its value
+ * never meet in the same subject, and a pattern for a bare three-digit number
+ * would be the kind of loose rule the note below explains this file refuses.
+ * The constant a PHP receiver would name it with IS a pattern, and so is the
+ * sentence, which is two doors on the same room.
  *
  * ---------------------------------------------------------------------------
  * WHY THE PHP TOKENISER AND NOT A REGULAR EXPRESSION OVER THE TEXT
@@ -257,6 +296,14 @@ const FACTUAREA_WC_PAYWALL_PATTERNS = array(
 		FACTUAREA_WC_PAYWALL_WORD_START . 'wc_am_\w*' . FACTUAREA_WC_PAYWALL_WORD_END,
 		FACTUAREA_WC_PAYWALL_WORD_START . 'wc_api_manager' . FACTUAREA_WC_PAYWALL_WORD_END,
 	),
+	'conditions a feature on something the merchant has to buy, which is the paywall of the licence family wearing another noun' => array(
+		FACTUAREA_WC_PAYWALL_WORD_START . 'subscription[_-]?(?:status|state|active|tier|level|expired|expires)' . FACTUAREA_WC_PAYWALL_WORD_END,
+		FACTUAREA_WC_PAYWALL_WORD_START . 'entitlement\w*' . FACTUAREA_WC_PAYWALL_WORD_END,
+		FACTUAREA_WC_PAYWALL_WORD_START . 'paid[_-]?(?:plan|plans|tier|tiers|feature|features)' . FACTUAREA_WC_PAYWALL_WORD_END,
+		FACTUAREA_WC_PAYWALL_WORD_START . 'plan[_-]?(?:allows?|allowed|gate|gates|gated|check|status|active|tier)' . FACTUAREA_WC_PAYWALL_WORD_END,
+		FACTUAREA_WC_PAYWALL_WORD_START . 'requires?[\s_-](?:an?[\s_-]+)?(?:paid[\s_-]+)?plan' . FACTUAREA_WC_PAYWALL_WORD_END,
+		FACTUAREA_WC_PAYWALL_WORD_START . 'payment[\s_-]?required' . FACTUAREA_WC_PAYWALL_WORD_END,
+	),
 	'is a sentence that tells the reader a feature is being withheld until they pay' => array(
 		FACTUAREA_WC_PAYWALL_WORD_START . 'upgrade\s+to\s+(?:the\s+)?(?:a\s+)?(?:pro|premium|paid)' . FACTUAREA_WC_PAYWALL_WORD_END,
 		FACTUAREA_WC_PAYWALL_WORD_START . 'upgrade\s+your\s+plan' . FACTUAREA_WC_PAYWALL_WORD_END,
@@ -325,6 +372,16 @@ const FACTUAREA_WC_PAYWALL_LICENCE_MARKERS = array(
  * The plugin entry point, whose header declares the licence to WordPress.
  */
 const FACTUAREA_WC_PAYWALL_PLUGIN_FILE = 'factuarea-for-woocommerce.php';
+
+/**
+ * The public directory listing, relative to the repository root.
+ *
+ * Declared beside the licence and the entry point rather than written inline
+ * in the packaging list, because the three of them are the answer to the same
+ * question - what travels inside the artefact - and a name repeated in two
+ * places is a name that ends up disagreeing with itself.
+ */
+const FACTUAREA_WC_PAYWALL_LISTING_FILE = 'readme.txt';
 
 /**
  * Spellings of "GPL version 2 or later" the plugin header may use.
@@ -406,6 +463,9 @@ const FACTUAREA_WC_PAYWALL_ARTEFACT_REQUIRED = array(
 	),
 	'is the plugin itself' => array(
 		'src/',
+	),
+	'is the directory listing, which is the page every merchant reads before installing; an artefact without it installs and runs, and the directory shows the plugin with no description at all' => array(
+		FACTUAREA_WC_PAYWALL_LISTING_FILE,
 	),
 );
 
@@ -608,7 +668,35 @@ function factuarea_wc_paywall_scan_file( string $absolute, string $relative ): a
 			foreach ( $patterns as $pattern ) {
 				$count = preg_match_all( $pattern, $token[1], $matches, PREG_OFFSET_CAPTURE );
 
-				if ( false === $count || 0 === $count ) {
+				/*
+				 * A pattern that does not COMPILE is not a pattern that found
+				 * nothing, and treating the two the same is how this gate would
+				 * lie. MEASURED on 2026-09-18 while the vocabulary was being
+				 * widened: two new patterns carried an invalid range inside a
+				 * character class, the engine returned false on every token,
+				 * and the gate reported the paywalled fixture as carrying four
+				 * fewer offences than it does - with no exit code to show for
+				 * it. A rule that switched itself off in silence is the exact
+				 * failure the rest of this file is built against, so the
+				 * failure is reported as a finding of its own, which fails the
+				 * run and names the rule that stopped running.
+				 */
+				if ( false === $count ) {
+					$findings[] = array(
+						'key'     => factuarea_wc_paywall_key( $relative, $token[2], 'uncompilable pattern' ),
+						'path'    => $relative,
+						'line'    => $token[2],
+						'message' => sprintf(
+							'was not scanned for one rule of the vocabulary: the pattern %s could not be compiled, so it matched nothing anywhere. A rule that does not run is not a rule that found nothing. Fix the pattern under "%s".',
+							$pattern,
+							$reason
+						),
+					);
+
+					continue;
+				}
+
+				if ( 0 === $count ) {
 					continue;
 				}
 

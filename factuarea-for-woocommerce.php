@@ -3,7 +3,7 @@
  * Plugin Name:          Factuarea for WooCommerce
  * Plugin URI:           https://factuarea.com
  * Description:          Captures the buyer tax ID at checkout and delivers paid WooCommerce orders and refunds to Factuarea, which turns them into invoices.
- * Version:              0.1.0
+ * Version:              0.2.0
  * Requires at least:    6.5
  * Requires PHP:         8.1
  * Requires Plugins:     woocommerce

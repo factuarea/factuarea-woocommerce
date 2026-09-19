@@ -51,14 +51,16 @@
     "scripts": {
         "test": "phpunit",
         "lint:phpcs": "phpcs",
-        "lint:english": "php scripts/check-english.php src scripts readme.txt README.md docs",
+        "lint:english": "php scripts/check-english.php src scripts factuarea-for-woocommerce.php uninstall.php readme.txt README.md docs",
         "lint:no-paywall": "php scripts/check-no-paywall.php",
+        "lint:tested-up-to": "php scripts/check-tested-up-to.php",
         "package": "rm -rf dist && mkdir -p dist/factuarea-for-woocommerce && rsync -a --exclude-from=.distignore --exclude='.git/' --exclude='dist/' ./ dist/factuarea-for-woocommerce/ && cd dist && zip -rq factuarea-for-woocommerce.zip factuarea-for-woocommerce",
         "verify": [
             "@test",
             "@lint:phpcs",
             "@lint:english",
             "@lint:no-paywall",
+            "@lint:tested-up-to",
             "@package"
         ]
     },
@@ -67,7 +69,8 @@
         "lint:phpcs": "Runs the WordPress and WooCommerce coding standards over src/, scripts/ and the two plugin root files.",
         "lint:english": "Fails when a user-facing string of the package is written in Spanish.",
         "lint:no-paywall": "Fails when a feature of the plugin is gated behind a payment, a licence or a plan upgrade, and checks the licence file and the packaged artefact.",
+        "lint:tested-up-to": "Fails when the declared WordPress and WooCommerce versions contradict each other, and emits the declared tested pair for the revalidation job.",
         "package": "Builds dist/factuarea-for-woocommerce.zip exactly as it would be published, honouring .distignore.",
-        "verify": "Runs test, lint:phpcs, lint:english, lint:no-paywall and package, in that order."
+        "verify": "Runs test, lint:phpcs, lint:english, lint:no-paywall, lint:tested-up-to and package, in that order."
     }
 }

@@ -1,0 +1,6 @@
+{
+    "order_id": "1042",
+    "status": "returned",
+    "occurred_at": "2026-09-24T16:45:00+00:00",
+    "idempotency_key": "wc-1042-returned-20260924T164500Z"
+}

@@ -26,6 +26,8 @@ const { execFileSync } = require( 'node:child_process' );
 
 const {
 	DELIVERY_HEADERS,
+	STORE_ID_HEADER,
+	STORE_ID_OPTION,
 	VALID_TAX_ID,
 	addProductToCart,
 	deliveries,
@@ -37,6 +39,7 @@ const {
 	placeClassicOrder,
 	programReceiver,
 	resetSite,
+	setOptions,
 	settings,
 } = require( './support/site' );
 
@@ -230,5 +233,103 @@ test.describe( 'Delivery', () => {
 			configured.delivery_enabled,
 			'Delivery switched itself off after five failures. That is what WooCommerce\'s native webhooks do, and it is the silence this plugin exists to remove.'
 		).toBe( '1' );
+	} );
+
+	test( 'carries the store identity as an eighth header when one is configured, and exactly the seven native ones when it is not', async ( { page, request } ) => {
+		const seeded = await fixtures( request );
+		const configured = await settings( request );
+
+		expect(
+			configured.store_id,
+			'The shop has no store identifier configured, so the half of this scenario about the eighth header would pass against a plugin that never sends it.'
+		).not.toBe( '' );
+
+		/**
+		 * The nine header names this scenario is about, in the order they
+		 * arrived, with everything the HTTP transport adds of its own - host,
+		 * user agent, content length - filtered out.
+		 *
+		 * @param {any} delivery One recorded delivery.
+		 * @returns {string[]} The names, in wire order.
+		 */
+		const relevantOrder = ( delivery ) => {
+			expect(
+				delivery.header_order,
+				'The harness could not establish the order the headers arrived in, so the position of the identity header cannot be asserted and a positional claim would be checked against nothing.'
+			).not.toHaveLength( 0 );
+
+			return delivery.header_order.filter(
+				( name ) => DELIVERY_HEADERS.includes( name ) || STORE_ID_HEADER === name || 'content-type' === name
+			);
+		};
+
+		await programReceiver( request, { fallback: { status: 200, body: '' } } );
+
+		await addProductToCart( page, seeded.product_id );
+		await page.goto( seeded.classic_checkout_url );
+		await expect( page.locator( '#billing_first_name' ) ).toBeVisible();
+		await placeClassicOrder( page, VALID_TAX_ID );
+
+		await drain( request );
+
+		const identified = ( await deliveries( request ) )[ 0 ];
+
+		expect( identified, 'Nothing reached the receiver, so there is no delivery to read headers off.' ).toBeTruthy();
+		expect( identified.headers[ STORE_ID_HEADER ] ).toBe( configured.store_id );
+
+		/*
+		 * THE POSITION IS THE CLAIM, not merely the presence. The seven native
+		 * headers are what makes this delivery indistinguishable from a webhook
+		 * WooCommerce sent itself, and the identity header is an addition AFTER
+		 * them: a receiver that read the seven positionally would break the day
+		 * an eighth was inserted among them.
+		 */
+		expect(
+			relevantOrder( identified ),
+			'The store identity is not the eighth header, after the seven native ones and before the content type.'
+		).toEqual( [ ...DELIVERY_HEADERS, STORE_ID_HEADER, 'content-type' ] );
+
+		expect( identified.signature_valid ).toBe( true );
+
+		/*
+		 * NOW THE SAME SHOP WITHOUT AN IDENTIFIER, and with whitespace rather
+		 * than an empty string: a merchant who cleared the field by selecting it
+		 * and pressing space has not configured an identity, and a plugin that
+		 * sent one header holding three spaces would be handing the platform a
+		 * store it cannot resolve.
+		 */
+		await setOptions( request, { [ STORE_ID_OPTION ]: '   ' } );
+		await resetSite( request );
+		await programReceiver( request, { fallback: { status: 200, body: '' } } );
+
+		await addProductToCart( page, seeded.product_id );
+		await page.goto( seeded.classic_checkout_url );
+		await expect( page.locator( '#billing_first_name' ) ).toBeVisible();
+		await placeClassicOrder( page, VALID_TAX_ID );
+
+		await drain( request );
+
+		const anonymous = ( await deliveries( request ) )[ 0 ];
+
+		expect(
+			anonymous,
+			'Without a store identifier nothing was delivered at all. The identifier is an addition to the delivery, never a precondition of it.'
+		).toBeTruthy();
+		expect( anonymous.headers[ STORE_ID_HEADER ] ).toBeUndefined();
+		expect(
+			relevantOrder( anonymous ),
+			'Without a store identifier the delivery carries something other than exactly the seven native headers and the content type.'
+		).toEqual( [ ...DELIVERY_HEADERS, 'content-type' ] );
+
+		/*
+		 * The signature covers the BODY and nothing else, so it verifies in both
+		 * halves of this scenario. A signature that had been computed over the
+		 * headers as well would hold in one and fail in the other, and the
+		 * receiver would refuse every delivery of a shop that filled its
+		 * identity in.
+		 */
+		expect( anonymous.signature_valid ).toBe( true );
+
+		await setOptions( request, { [ STORE_ID_OPTION ]: configured.store_id } );
 	} );
 } );

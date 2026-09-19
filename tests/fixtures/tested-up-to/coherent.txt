@@ -1,0 +1,31 @@
+=== Factuarea for WooCommerce ===
+Contributors: factuarea
+Tags: woocommerce, invoicing, invoices, spain, verifactu
+Requires at least: 6.5
+Tested up to: 7.2
+Requires PHP: 8.1
+Stable tag: 0.1.0
+License: GPLv2 or later
+License URI: https://www.gnu.org/licenses/gpl-2.0.html
+WC requires at least: 8.9
+WC tested up to: 8.9
+
+A coherent listing: everything the gate reads is legible, nothing tested is
+below what is required, and the two minimums are the ones the plugin header and
+Constants declare.
+
+== Description ==
+
+This listing is a fixture of the version-coherence gate and is never published.
+The WordPress version it declares as tested - 7.2 - is on purpose NOT the one the
+real readme.txt of this repository declares: the emission mode has to print what
+the listing it was pointed at says, and a fixture that repeated the real
+declaration would pass just as happily against a gate that printed a hardcoded
+pair.
+
+The WooCommerce one, in contrast, IS the real one, because that claim is also
+written in the plugin header of this repository and the gate compares the two.
+
+The minimums are the real ones for the same reason: the gate compares them
+against the plugin header and Constants of this repository, and this fixture is
+the case where nothing disagrees.

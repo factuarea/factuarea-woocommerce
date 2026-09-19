@@ -225,6 +225,41 @@ final class OrderRefundedListener {
 	 * normalised below instead, and anything that is not a usable identifier
 	 * ends the call without enqueueing.
 	 *
+	 * ---------------------------------------------------------------------------
+	 * WHY THE FIRST THING IT DOES IS ASK WHERE THE REFUND CAME FROM
+	 * ---------------------------------------------------------------------------
+	 * Factuarea also PUBLISHES refunds towards this shop: a customer returns an
+	 * item, the platform issues the corrective document, and the inbound half of
+	 * this plugin records the money against the order with `wc_create_refund()`.
+	 * That call fires this very hook, with nothing about it that distinguishes it
+	 * from the merchant refunding a customer by hand - because at the level of
+	 * WooCommerce there is no difference: both are one refund of one order.
+	 *
+	 * Without this guard that refund would travel straight back to Factuarea as a
+	 * return of the shop, and the receiver would rectify the sale a SECOND time.
+	 * The sale was already invoiced in a consecutive series filed with the tax
+	 * authority, where a document is not deleted: a corrective invoice issued by
+	 * mistake is not removed, it is corrected with yet another document, by hand,
+	 * weeks later, once somebody notices that the customer's file holds two
+	 * corrections for one return. That is the failure this line prevents, and it
+	 * is the reason the mark is read BEFORE anything else happens.
+	 *
+	 * Before the identity, and before the body above all: building the body is
+	 * the expensive half of this method - a whole order representation assembled
+	 * through WooCommerce's REST layer - and a shop that receives its refunds
+	 * from the platform would pay it for every single one of them, to throw the
+	 * result away.
+	 *
+	 * The mark is written onto the REFUND by the inbound half, and both of this
+	 * plugin's refund captors read it; see `Contract\Constants::INBOUND_REFUND_META_KEY`
+	 * for why guarding only one of the two leaves the loop open through the
+	 * other.
+	 *
+	 * Nothing is logged when a refund is held back. This is the expected outcome
+	 * of an integration that works, not a failure, and a shop whose refunds come
+	 * from the platform would otherwise find its log screen full of error lines
+	 * reporting that everything went fine.
+	 *
 	 * @param mixed $order_id  Identifier of the refunded order, as the hook passes it.
 	 * @param mixed $refund_id Identifier of the refund that was just created, as the hook passes it.
 	 * @return void
@@ -241,6 +276,12 @@ final class OrderRefundedListener {
 				)
 			);
 
+			return;
+		}
+
+		$refund_object = self::refund_object( $refund );
+
+		if ( null !== $refund_object && self::came_from_factuarea( $refund_object ) ) {
 			return;
 		}
 
@@ -270,7 +311,66 @@ final class OrderRefundedListener {
 		 */
 		$this->outbox()->enqueue( $event_id, $order, self::EVENT_TYPE, $raw_body, home_url() );
 
-		$this->remember_idempotency_key( $refund, $event_id );
+		if ( null !== $refund_object ) {
+			$this->remember_idempotency_key( $refund_object, $event_id );
+		}
+	}
+
+	/**
+	 * The refund object behind an identifier, or null when there is not one.
+	 *
+	 * Read through `wc_get_order()` and not through the post meta functions
+	 * because a refund is not a post under the modern order storage, and a
+	 * reader that assumed it was would find no mark at all on exactly the shops
+	 * that run it - which is to say, the shops the guard matters on.
+	 *
+	 * A refund that cannot be read gives the caller no reason to hold anything
+	 * back, and that asymmetry is deliberate. A refund delivered when it should
+	 * not have been is absorbed by the receiver, which refuses a corrective
+	 * document it has already issued for that idempotency key; a refund of the
+	 * shop dropped here is money given back with no corrective document at all,
+	 * and nothing downstream ever notices.
+	 *
+	 * @param int $refund_id Identifier of the refund the hook named.
+	 * @return \WC_Order_Refund|null
+	 */
+	private static function refund_object( int $refund_id ): ?\WC_Order_Refund {
+		if ( ! function_exists( 'wc_get_order' ) ) {
+			return null;
+		}
+
+		$refund = wc_get_order( $refund_id );
+
+		return $refund instanceof \WC_Order_Refund ? $refund : null;
+	}
+
+	/**
+	 * Whether this refund is one Factuarea published and this plugin recorded,
+	 * rather than one the merchant gave back in this shop.
+	 *
+	 * It is the VALUE that answers, not the presence of the key: WooCommerce
+	 * hands back an empty string for a meta key that was never written, so
+	 * "absent" and "present and empty" are one and the same reading. The inbound
+	 * half always writes the idempotency key of the notice that produced the
+	 * refund, so a refund of the platform always carries something; anything
+	 * empty is a refund of this shop and travels.
+	 *
+	 * @param \WC_Order_Refund $refund Refund the hook named.
+	 * @return bool
+	 */
+	private static function came_from_factuarea( \WC_Order_Refund $refund ): bool {
+		$mark = $refund->get_meta( Constants::INBOUND_REFUND_META_KEY );
+
+		// A value of any shape under the key is a mark: the only writer stores a
+		// string, so a non-scalar here is a store misbehaving, and between the
+		// two ways of being wrong the guard fails CLOSED (the merchant sees a
+		// corrective document to re-issue) rather than open (a second corrective
+		// on a sale already corrected). Same reading as the status captor.
+		if ( ! is_scalar( $mark ) ) {
+			return array() !== $mark && null !== $mark;
+		}
+
+		return '' !== trim( (string) $mark );
 	}
 
 	/**
@@ -310,20 +410,20 @@ final class OrderRefundedListener {
 	 * entry is in the outbox, and it writes nothing when there is no store
 	 * identifier configured yet or when the key it would write is already there.
 	 *
-	 * @param int    $refund_id Identifier of the refund.
-	 * @param string $event_id  Identity composed for this refund.
+	 * It is handed the refund the guard above already read, rather than reading
+	 * it again. The read has to happen before the body is built either way -
+	 * that is where the anti-loop mark lives - and doing it twice would hydrate
+	 * the same refund twice in every request in which a merchant refunds a
+	 * customer.
+	 *
+	 * @param \WC_Order_Refund $refund   The refund, as the guard above read it.
+	 * @param string           $event_id Identity composed for this refund.
 	 * @return void
 	 */
-	private function remember_idempotency_key( int $refund_id, string $event_id ): void {
+	private function remember_idempotency_key( \WC_Order_Refund $refund, string $event_id ): void {
 		$store_id = trim( (string) get_option( Constants::OPTION_STORE_ID, '' ) );
 
 		if ( '' === $store_id ) {
-			return;
-		}
-
-		$refund = wc_get_order( $refund_id );
-
-		if ( ! $refund instanceof \WC_Order_Refund ) {
 			return;
 		}
 

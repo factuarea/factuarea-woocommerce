@@ -49,6 +49,31 @@ namespace Factuarea\WooCommerce\Scripts;
  * with a paragraph asking people to remember.
  *
  * ---------------------------------------------------------------------------
+ * WHERE THE EXCEPTION ENDS
+ * ---------------------------------------------------------------------------
+ * The exception covers THREE package repositories and nothing else, because
+ * three marketplaces ask for English in writing:
+ *
+ *   - this package, published to the WordPress plugin directory;
+ *   - the public Shopify app, published to the Shopify App Store;
+ *   - the n8n nodes, published to npm.
+ *
+ * Everything else keeps Spanish, with parity across the three locales the
+ * product ships and the gates that enforce it: the backend, the web
+ * application, the documentation portal, the assistant, the command line and
+ * the software development kits. A package regenerated inside a synchronisation
+ * wave does not change language either; that would be a product change wearing
+ * the clothes of a regeneration.
+ *
+ * THE EXCEPTION DOES NOT TRAVEL. No string of this repository authorises a
+ * single English string in the monorepo, and "the WooCommerce plugin writes it
+ * this way" is not an argument there - it is the description of a boundary, on
+ * the far side of it. The direction that matters is the one nobody defends:
+ * this file exists to stop Spanish coming IN, and the paragraph above exists to
+ * stop English going OUT. A reader who arrived here looking for a precedent has
+ * found the reason there is none.
+ *
+ * ---------------------------------------------------------------------------
  * USAGE
  * ---------------------------------------------------------------------------
  *     php scripts/check-english.php <path> [<path>...]
@@ -104,6 +129,36 @@ namespace Factuarea\WooCommerce\Scripts;
  * the reader where to go and "a Spanish string" does not. A classifier that
  * decided WHAT to inspect would be a list of shapes, and the first user-facing
  * string written in a shape nobody enumerated would pass in silence.
+ *
+ * THE INBOUND HALF, MEASURED RATHER THAN ASSUMED. Four surfaces arrived with
+ * it, and the sweep was checked against each one instead of being widened by
+ * reflex. Three of them live under `src` and the fourth under `docs`, and both
+ * are already in the scope the `lint:english` script hands this file, so the
+ * sweep needed nothing:
+ *
+ *   - the messages of the two receivers (`src/Inbound`);
+ *   - the labels of the settings section that governs them (`src/Admin`);
+ *   - the fulfilment status labels shown to the buyer (`src/MyAccount`);
+ *   - the inbound contract document (`docs`), which is prose and is read by
+ *     the same extractor as the public directory listing.
+ *
+ * What DID need widening was the naming. A receiver message reaches the sender
+ * in the body of a REST answer, so it is neither a translated label nor an
+ * exception message; before it was recognised the gate reported it as a plain
+ * string literal when it travelled in the answer body and as an exception
+ * message when it travelled inside a WordPress error object, and the second
+ * reading sends whoever fixes it looking for a `throw` that is not there. The
+ * two shapes are recognised below, and the fixtures under
+ * `tests/fixtures/english-gate/` prove it on both.
+ *
+ * ONE PATH PAIR THIS SCOPE DOES NOT REACH, WRITTEN DOWN SO THAT NOBODY READS A
+ * GREEN RUN AS MORE THAN IT IS. `factuarea-for-woocommerce.php` and
+ * `uninstall.php` are swept by the coding standard and by the no-paywall gate,
+ * and are NOT in the `lint:english` scope, even though the plugin header of the
+ * first is read by every merchant on the plugins screen and by the directory.
+ * No surface of the inbound half lives in either, so this is not a hole this
+ * file can close on its own: the scope lives in `composer.json` - see the
+ * portability note at the end - and belongs to the phase that wires it.
  *
  * ---------------------------------------------------------------------------
  * KNOWN LIMITATIONS, STATED ON PURPOSE
@@ -435,6 +490,53 @@ final class EnglishGate {
 		'wp_die',
 		'wp_admin_notice',
 		'wp_get_admin_notice',
+	);
+
+	/**
+	 * Calls whose literals travel back to the caller inside the body of a REST
+	 * answer, which is how the receivers of this package speak.
+	 *
+	 * `WP_Error` is in the list, and the trade is written down rather than left
+	 * to be discovered. Its name carries the word this gate uses to recognise
+	 * an exception, so without an entry here a receiver message built as an
+	 * error object is reported as an exception message and its reader goes
+	 * looking for a `throw`. Measured on 2026-09-18: no source of this package
+	 * constructs a `WP_Error` for any other purpose - the checkout validator
+	 * adds to an error bag it is handed, which is a different shape and is
+	 * recognised by the translation call around its text. Should that change,
+	 * the label still points at a message that travels back to a caller, which
+	 * is the half of the reading that matters.
+	 *
+	 * @var string[]
+	 */
+	private const RESPONSE_FUNCTIONS = array(
+		'wp_error',
+		'wp_rest_response',
+		'rest_ensure_response',
+		'wp_send_json',
+		'wp_send_json_error',
+		'wp_send_json_success',
+	);
+
+	/**
+	 * Array keys whose value is text of a receiver answer.
+	 *
+	 * The body of an answer is usually composed as an array before it reaches
+	 * the call that returns it, and the walk back to the enclosing call stops
+	 * at the bracket that opens the array. Without these keys the message of a
+	 * receiver would be recognised only in the shape where it is written
+	 * directly as an argument, which is the shape this package uses least.
+	 *
+	 * `message` is not a guess: it is the field the sender reads, frozen in
+	 * `Contract\Constants` as the message field of a rejection body.
+	 *
+	 * @var string[]
+	 */
+	private const RECEIVER_TEXT_KEYS = array(
+		'message',
+		'reason',
+		'detail',
+		'details',
 	);
 
 	/**
@@ -795,22 +897,56 @@ final class EnglishGate {
 			if ( in_array( strtolower( $call['name'] ), self::NOTICE_FUNCTIONS, true ) ) {
 				return 'administration notice';
 			}
+
+			/*
+			 * Before the exception branch on purpose: `WP_Error` matches the
+			 * rule that recognises an exception by its name, and a receiver
+			 * message reported as an exception message sends its reader to the
+			 * wrong file. See the note on the constant.
+			 */
+			if ( in_array( strtolower( $call['name'] ), self::RESPONSE_FUNCTIONS, true ) ) {
+				return 'receiver message';
+			}
 			if ( $call['is_exception'] ) {
 				return 'exception message';
 			}
 		}
 
-		$previous = self::significant_before( $tokens, $index, 1 );
-		$before   = self::significant_before( $tokens, $index, 2 );
-		if ( null !== $previous && null !== $before
-			&& T_DOUBLE_ARROW === self::token_id( $previous )
-			&& T_CONSTANT_ENCAPSED_STRING === self::token_id( $before )
-			&& in_array( self::unquote( self::token_text( $before ) ), self::FIELD_TEXT_KEYS, true )
-		) {
-			return 'settings or checkout field text';
+		$key = self::preceding_array_key( $tokens, $index );
+		if ( null !== $key ) {
+			if ( in_array( $key, self::FIELD_TEXT_KEYS, true ) ) {
+				return 'settings or checkout field text';
+			}
+			if ( in_array( $key, self::RECEIVER_TEXT_KEYS, true ) ) {
+				return 'receiver message';
+			}
 		}
 
 		return 'string literal';
+	}
+
+	/**
+	 * The array key a literal is the value of, when it is one.
+	 *
+	 * @param array<int, array|string> $tokens All tokens of the file.
+	 * @param int                      $index  Index of the literal.
+	 * @return string|null The key, unquoted, or null when the literal is not a value.
+	 */
+	private static function preceding_array_key( array $tokens, int $index ): ?string {
+		$previous = self::significant_before( $tokens, $index, 1 );
+		$before   = self::significant_before( $tokens, $index, 2 );
+
+		if ( null === $previous || null === $before ) {
+			return null;
+		}
+
+		if ( T_DOUBLE_ARROW !== self::token_id( $previous )
+			|| T_CONSTANT_ENCAPSED_STRING !== self::token_id( $before )
+		) {
+			return null;
+		}
+
+		return self::unquote( self::token_text( $before ) );
 	}
 
 	/**

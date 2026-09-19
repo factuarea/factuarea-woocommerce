@@ -1,6 +1,7 @@
 <?php
 /**
- * The seven native delivery headers of an outgoing delivery.
+ * The seven native delivery headers of an outgoing delivery, and the package's
+ * own eighth when a store identifier is configured.
  *
  * @package Factuarea\WooCommerce
  */
@@ -35,6 +36,45 @@ use Factuarea\WooCommerce\Contract\Constants;
  *
  * The returned array is keyed by header name, in `Constants::DELIVERY_HEADERS`
  * order, which is the order a native delivery sends them.
+ *
+ * ---------------------------------------------------------------------------
+ * THE EIGHTH HEADER, AND WHY THERE IS ONE AT ALL
+ * ---------------------------------------------------------------------------
+ * `Constants::HEADER_STORE_ID` carries the identifier of this store in
+ * Factuarea, and it is the ONE header of this package's own that a delivery
+ * ever grows. It exists because the seven native ones cannot answer the
+ * question the receiver has to answer first:
+ *
+ * TWO SHOPS REGISTERED UNDER THE SAME CONNECTION ARE NOT TOLD APART BY THE
+ * ORIGIN ADDRESS. The address travels in `HEADER_SOURCE` and it is
+ * `home_url()`, which is where the shop lives and not which shop it is to
+ * Factuarea; a merchant who registered two of them under one account sends two
+ * addresses the receiver has no mapping for. Guessing which of the two sent a
+ * sale is guessing WHICH COMPANY IT INVOICES AGAINST - and an invoice issued
+ * against the wrong company lands in a correlative series that nobody is
+ * allowed to delete.
+ *
+ * The identifier is the value the merchant PASTED FROM FACTUAREA into the
+ * settings screen, so it is exactly the key an identity extractor on the other
+ * side would look up. It is never derived from the order, from the body, or
+ * from the site address: a value derived from any of those would be this
+ * plugin's guess about an identity that is registered elsewhere.
+ *
+ * IT IS ADDITIVE, AND THAT IS ENFORCED RATHER THAN INTENDED. It is deliberately
+ * not part of `Constants::DELIVERY_HEADERS` - that list is «the seven a native
+ * WooCommerce delivery sends» and is asserted as such - it is appended AFTER
+ * the seven, it renames and replaces none of them, and it travels only when an
+ * identifier is configured. A receiver that knows only the native set keeps
+ * accepting the delivery without changing a line, and an installation that
+ * never configured an identifier sends exactly what it sent before.
+ *
+ * THE EMPTY STRING IS THE ABSENT VALUE, and it is one value rather than two on
+ * purpose: `get_option()` answers an unset option with it, so «not configured»
+ * and «not passed» are the same case here. Whoever reads the option trims it -
+ * every read site of this package does, see the outbox dispatcher - so a value
+ * that is only whitespace never reaches this method as one that is configured.
+ * Sending a header with a blank value would be worse than sending none: the
+ * other side would have to decide what an empty identity means.
  *
  * ---------------------------------------------------------------------------
  * WHAT IS DELIBERATELY NOT HERE
@@ -91,8 +131,9 @@ final class DeliveryHeaders {
 	 * @param string $signature   Signature produced by DeliverySigner over the exact body that will be sent.
 	 * @param int    $webhook_id  Identifier of the webhook. Tracing only.
 	 * @param int    $delivery_id Identifier of this delivery attempt. Tracing only; it changes on every attempt.
+	 * @param string $store_id    Identifier of this store in Factuarea, as the merchant configured it, or the empty string when none is configured. OPTIONAL AND LAST so that every call written against the frozen seven-parameter form keeps working untouched - the same resource, and for the same reason, that `Outbox\RetryPlanner::next_attempt_at()` used for its third parameter.
 	 *
-	 * @return array<string, string> The seven native delivery headers, keyed by name, in native order.
+	 * @return array<string, string> The seven native delivery headers, keyed by name, in native order, followed by the package header with the store identifier when one is configured.
 	 */
 	public function for_order(
 		string $topic,
@@ -102,9 +143,10 @@ final class DeliveryHeaders {
 		string $source,
 		string $signature,
 		int $webhook_id,
-		int $delivery_id
+		int $delivery_id,
+		string $store_id = ''
 	): array {
-		return array(
+		$headers = array(
 			Constants::HEADER_SOURCE      => $source,
 			Constants::HEADER_TOPIC       => $topic,
 			Constants::HEADER_RESOURCE    => $resource,
@@ -113,5 +155,23 @@ final class DeliveryHeaders {
 			Constants::HEADER_WEBHOOK_ID  => (string) $webhook_id,
 			Constants::HEADER_DELIVERY_ID => (string) $delivery_id,
 		);
+
+		/*
+		 * No identifier configured: the delivery is the seven of always, which
+		 * is what every installation sent before this header existed and what
+		 * an installation that never fills the field keeps sending.
+		 */
+		if ( '' === $store_id ) {
+			return $headers;
+		}
+
+		/*
+		 * APPENDED, never inserted. The seven keep their names, their values
+		 * and their positions, so the set stays byte-comparable with a native
+		 * delivery for whoever diffs the two while debugging.
+		 */
+		$headers[ Constants::HEADER_STORE_ID ] = $store_id;
+
+		return $headers;
 	}
 }

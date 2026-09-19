@@ -41,6 +41,12 @@ use ReflectionClass;
  *  3. A transition into refunded records one entry per refund, with the identity
  *     the refund listener composes for the same refund, and with the body of the
  *     ORDER - which is where the receiver reads the refunds from.
+ *  4. A refund this plugin created from an INBOUND notice is recorded by NOBODY.
+ *     A total refund changes the order status, so it arrives here as well as at
+ *     the refund listener, and sending it back would ask the platform to correct
+ *     an invoice it has already corrected - a second corrective document in a
+ *     series filed with the tax authority, which is not deleted but corrected
+ *     with a third one, weeks later, by hand.
  *
  * The identity is never spelled out as a literal in this file. Every assertion
  * asks `EventIdentity` for it, which is the single place all three capture
@@ -85,6 +91,16 @@ final class OrderStatusChangedListenerTest extends TestCase {
 	 * Path of the file the sweep reads, relative to the repository root.
 	 */
 	private const SOURCE_RELATIVE_PATH = 'src/Events/OrderStatusChangedListener.php';
+
+	/**
+	 * What the anti-loop mark holds on a refund this plugin created from an
+	 * inbound notice: the idempotency key of the notice that produced it.
+	 *
+	 * The VALUE is never read by this listener - only its presence is - and that
+	 * is on purpose: the listener has no way to tell a well-formed key from a
+	 * malformed one, and a mark it refused to believe would put the loop back.
+	 */
+	private const INBOUND_MARK = 'shop-7a1c:refund:9102';
 
 	/**
 	 * Rows the outbox holds, keyed by event identity so that a repeat of the
@@ -442,6 +458,160 @@ final class OrderStatusChangedListenerTest extends TestCase {
 	}
 
 	/**
+	 * A refunded transition whose only refund came from an inbound notice records
+	 * NOTHING - and, in particular, does not fall back to the total identity.
+	 *
+	 * This is the case the guard exists for, and it is also the case a careless
+	 * guard gets wrong. Filtering the marked refund out leaves the list of
+	 * identities empty, and the method already has a fallback for an empty list:
+	 * the TOTAL refund of the order. Letting that fallback fire here would send
+	 * back, under a different identity, the very refund that was just filtered
+	 * out - so the loop would still close, only now disguised as a different
+	 * event. The receiver would then correct an invoice it has already corrected,
+	 * in a consecutive series filed with the tax authority.
+	 *
+	 * The fallback has a meaning, and the meaning does not hold here: the
+	 * receiver derives a total refund from a body whose `refunds[]` is EMPTY, and
+	 * the body of this order carries the inbound refund. There is nothing for the
+	 * two sides to agree about.
+	 *
+	 * @return void
+	 */
+	public function test_a_refunded_order_whose_only_refund_came_from_an_inbound_notice_records_nothing(): void {
+		$this->orders[ self::ORDER_ID ] = $this->order_double( array( 9102 ), array( 9102 => self::INBOUND_MARK ) );
+
+		$this->listener()->handle( self::ORDER_ID, 'processing', 'refunded', $this->orders[ self::ORDER_ID ] );
+
+		$this->assertSame(
+			array(),
+			$this->rows,
+			'A refund this plugin created from an inbound notice may not be sent back. The platform corrected the invoice already; sending it back asks for a second corrective document over the same sale.'
+		);
+		$this->assertArrayNotHasKey(
+			EventIdentity::for_refund( self::ORDER_ID ),
+			$this->rows,
+			'The total-refund fallback may not fire here. It exists for an order that records NO refund, whose body reaches the receiver with an empty refunds[]; this order records one, so the fallback would be the inbound refund coming back under another name.'
+		);
+		$this->assertSame(
+			array(),
+			$this->build_calls,
+			'The guard has to run BEFORE the body is built: building it dispatches an internal REST request, and doing it to throw the result away puts that cost inside the request that is applying the refund.'
+		);
+	}
+
+	/**
+	 * An order carrying refunds of both kinds records the merchant's ones, in
+	 * their order, and none of the inbound ones.
+	 *
+	 * The mixed order is the realistic one and the one that tells a guard from a
+	 * blanket rule: a merchant who refunds a second item after the platform
+	 * published the first refund has to keep getting their corrective document.
+	 * Skipping the whole transition because one of its refunds is marked would
+	 * lose money back with no document, which is the silence this package exists
+	 * to remove.
+	 *
+	 * @return void
+	 */
+	public function test_an_order_with_refunds_of_both_kinds_records_only_the_ones_the_merchant_made(): void {
+		$this->orders[ self::ORDER_ID ] = $this->order_double(
+			array( 9101, 9102, 9103 ),
+			array( 9102 => self::INBOUND_MARK )
+		);
+
+		$this->listener()->handle( self::ORDER_ID, 'processing', 'refunded', $this->orders[ self::ORDER_ID ] );
+
+		$this->assertSame(
+			array( EventIdentity::for_refund( 9101 ), EventIdentity::for_refund( 9103 ) ),
+			array_keys( $this->rows ),
+			'Only the refunds the merchant made travel, and they travel in the order the order lists them. The inbound one is invisible to this listener, and the two around it are not affected by it being there.'
+		);
+		$this->assertSame(
+			array( self::ORDER_ID ),
+			$this->build_calls,
+			'One body for the transition, built once, exactly as without the guard.'
+		);
+	}
+
+	/**
+	 * The mark is read by its PRESENCE and not by whether it looks true.
+	 *
+	 * `'0'` is falsy in PHP, so a guard written with `empty()` or with a bare
+	 * truth test would declare a marked refund unmarked and send it back. The
+	 * mark holds the idempotency key of the notice that created the refund, and
+	 * this listener is in no position to judge its shape: any value it finds
+	 * there was written by the inbound half of this same plugin.
+	 *
+	 * @return void
+	 */
+	public function test_a_mark_that_looks_falsy_still_stops_the_refund(): void {
+		$this->orders[ self::ORDER_ID ] = $this->order_double( array( 9102 ), array( 9102 => '0' ) );
+
+		$this->listener()->handle( self::ORDER_ID, 'processing', 'refunded', $this->orders[ self::ORDER_ID ] );
+
+		$this->assertSame(
+			array(),
+			$this->rows,
+			'A mark of "0" is a mark. Reading it with empty() or with a truth test reopens the loop for every refund whose key happens to be falsy.'
+		);
+	}
+
+	/**
+	 * A mark that is not a scalar still stops the refund, and reading it casts
+	 * nothing.
+	 *
+	 * It cannot be written by this plugin - the inbound half stores the
+	 * idempotency key, a string - so it can only appear when something else
+	 * writes under our key. Which way to be wrong about it is a decision and not
+	 * an accident: casting an array to a string would raise a PHP warning inside
+	 * the request that is saving a merchant's order, and treating the value as
+	 * absent would send back a refund that may well be ours. The corrective
+	 * document that has to be reissued is visible; the duplicated one, filed in
+	 * a series registered with the tax authority, is found weeks later.
+	 *
+	 * @return void
+	 */
+	public function test_a_mark_that_is_not_a_scalar_still_stops_the_refund(): void {
+		$this->orders[ self::ORDER_ID ] = $this->order_double(
+			array( 9102 ),
+			array( 9102 => array( 'key' => self::INBOUND_MARK ) )
+		);
+
+		$this->listener()->handle( self::ORDER_ID, 'processing', 'refunded', $this->orders[ self::ORDER_ID ] );
+
+		$this->assertSame(
+			array(),
+			$this->rows,
+			'A value of any shape under the anti-loop key is a mark. Casting it to compare would also raise an array-to-string warning in the request that saves the order.'
+		);
+	}
+
+	/**
+	 * The listener reads the mark under the frozen constant, never under a
+	 * literal of its own.
+	 *
+	 * The key is written by `Inbound\RefundApplier` and read by BOTH captors of
+	 * this plugin. Three copies of one string is three chances for one of them to
+	 * drift, and the drift does not fail: the reader simply finds nothing, the
+	 * refund looks like the merchant's, and the loop reopens silently.
+	 *
+	 * @return void
+	 */
+	public function test_the_anti_loop_mark_is_read_under_the_frozen_constant(): void {
+		$code = self::source_without_comments();
+
+		$this->assertStringContainsString(
+			'Constants::INBOUND_REFUND_META_KEY',
+			$code,
+			'The anti-loop mark has to be asked of Constants, which is where the inbound half writes it.'
+		);
+		$this->assertStringNotContainsString(
+			"'_factuarea_inbound_refund'",
+			$code,
+			'The key of the mark may not be spelled out here. A literal keeps working until the day the constant changes, and then it stops matching without failing anything.'
+		);
+	}
+
+	/**
 	 * With no order object handed over - which third-party code firing this
 	 * action does - the order is read and the refunds are recorded all the same.
 	 *
@@ -710,17 +880,31 @@ final class OrderStatusChangedListenerTest extends TestCase {
 	/**
 	 * An order double that answers for its refunds and for nothing else.
 	 *
-	 * @param array<int, int> $refund_ids Identifiers of the refunds the order carries.
+	 * Each refund answers `get_meta()` BY KEY rather than handing the same value
+	 * back whatever it is asked for. That is what makes the anti-loop cases prove
+	 * something: a listener that read the mark under a key of its own invention
+	 * would be told the refund is unmarked, would enqueue it, and would fail here
+	 * instead of passing and reopening the loop in production.
+	 *
+	 * @param array<int, int>   $refund_ids Identifiers of the refunds the order carries, in order.
+	 * @param array<int, mixed> $inbound    Marks of the refunds this plugin created from an inbound notice, keyed by refund identifier. A refund absent from this map answers the empty string, which is what WooCommerce answers for a key it never wrote - that is, what a refund made by the merchant looks like.
 	 * @return object
 	 */
-	private function order_double( array $refund_ids ) {
+	private function order_double( array $refund_ids, array $inbound = array() ) {
 		$order = Mockery::mock( 'WC_Order' );
 
 		$refunds = array();
 
 		foreach ( $refund_ids as $refund_id ) {
+			$mark = $inbound[ $refund_id ] ?? '';
+
 			$refund = Mockery::mock( 'WC_Order_Refund' );
 			$refund->shouldReceive( 'get_id' )->andReturn( $refund_id );
+			$refund->shouldReceive( 'get_meta' )->andReturnUsing(
+				function ( string $key ) use ( $mark ) {
+					return Constants::INBOUND_REFUND_META_KEY === $key ? $mark : '';
+				}
+			);
 
 			$refunds[] = $refund;
 		}

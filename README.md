@@ -1,8 +1,8 @@
 # Factuarea for WooCommerce
 
-A WordPress plugin that captures the buyer tax ID at the WooCommerce checkout and
+A WordPress plugin that captures the buyer tax ID at the WooCommerce checkout,
 delivers paid orders and refunds to [Factuarea](https://factuarea.com), which turns
-them into invoices.
+them into invoices, and applies what Factuarea publishes back into the shop.
 
 It exists for two reasons, and both of them are failures you cannot fix from the
 Factuarea side.
@@ -20,6 +20,16 @@ bad deploy silence a shop's invoicing permanently, until a person notices. This
 plugin does not use them. It writes every order event into an outbox table of its
 own, synchronously, inside the request that took the payment, and delivers from
 there with its own backoff and its own idempotency.
+
+Once those two are solved, a third failure is left over, and it is the one the
+merchant pays for by hand. A shop that only **sends** shows the buyer an order that
+still says "processing" while the warehouse shipped it yesterday, and makes somebody
+copy every refund across by hand into a shop that will then try to refund it again.
+So the plugin also **listens**: it publishes three addresses of its own, applies the
+fulfilment status, the refunds and the catalogue data Factuarea sends to them, and
+does it without ever touching the native order status or the payment gateway. Both
+receivers arrive switched off. [The inbound half](#what-factuarea-can-write-into-this-shop)
+is below, and its contract is in [docs/inbound-contract.md](docs/inbound-contract.md).
 
 Everything the plugin does is free and GPL. Factuarea is the paid service; the
 commercial boundary is there and never inside the plugin.
@@ -43,9 +53,12 @@ Install and activate it like any other plugin: upload the ZIP under
 **Plugins > Add New > Upload Plugin**, or install it from the WordPress plugin
 directory once it is published there.
 
-Activation creates one table in this site's database, `<prefix>factuarea_outbox`,
-and schedules the drain that empties it. Nothing is sent anywhere until you finish
-the configuration below and switch delivery on.
+Activation creates two tables in this site's database - `<prefix>factuarea_outbox`,
+which holds what is waiting to be delivered, and `<prefix>factuarea_inbound`, which
+records the incoming deliveries that have already been applied so that a redelivery
+is not applied twice - and schedules the pass that drains the first and prunes the
+second. Nothing is sent anywhere until you finish the configuration below and switch
+delivery on, and nothing is applied from outside until you switch a receiver on.
 
 ## Configuration
 
@@ -120,6 +133,20 @@ From then on, a completed payment writes an entry into the outbox during the sam
 request that took the payment, and the delivery leaves right after, out of the
 buyer's way.
 
+### 6. Optionally, switch the receivers on
+
+Under **Receivers**, two switches decide whether Factuarea may write into this shop:
+one applies the order status, the tracking details and the refunds it publishes, the
+other applies the catalogue fields, the price and the stock of your articles. They
+are separate because wanting your prices published is not the same as wanting your
+orders written into.
+
+Both are off until you turn them on, and both are authenticated with the signing
+secret from step 3 - there is no second secret and no second field. The screen
+prints the address Factuarea will post to for each of them so that you can check it;
+you do not paste those addresses anywhere, because what Factuarea asks for is the
+address of the **shop** and it composes the rest itself.
+
 ### If the provider is not released yet
 
 Until Factuarea releases the WooCommerce provider on its side, the ingestion route
@@ -145,6 +172,40 @@ gets access to that invoice PDF from **My account > Orders**. When it has not, n
 link is shown: not a broken one and not a disabled one that promises something. The
 plugin never guesses the correlation from an amount or a date.
 
+The same page is where the buyer reads how their order is getting to them, once the
+order receiver is on: the fulfilment status Factuarea published - prepared, shipped,
+delivered, returned - and, for a shipment that declares them, the tracking number,
+the carrier and the tracking link. The same rule applies: nothing has arrived means
+nothing is shown, never a placeholder. The status sits **next to** the WooCommerce
+one and does not replace it.
+
+## What Factuarea can write into this shop
+
+Three addresses, all under this plugin's own REST namespace, all `POST`, all
+refused unless the delivery is signed with this shop's signing secret, and all
+behind a switch that starts off:
+
+| Address | What it applies |
+| --- | --- |
+| `/wp-json/factuarea/v1/order-status` | The fulfilment status of one order and its tracking details. |
+| `/wp-json/factuarea/v1/order-refund` | A refund Factuarea already issued, with the corrective invoice that backs it. |
+| `/wp-json/factuarea/v1/catalog-push` | The catalogue fields, the price and the available stock of a batch of articles. |
+
+Four properties are worth knowing before reading anything else, because each of
+them is a decision that could reasonably have gone the other way:
+
+* **The native order status is never touched.** The received status is stored and shown as the plugin's own. Setting the WooCommerce one would start this shop's automations, e-mail the buyer, and trip this plugin's own status captor, which would deliver the change straight back to Factuarea.
+* **A received refund moves no money.** It is recorded on the order with no gateway movement and no restocking, because the money was already returned on the other side and a corrective invoice already backs it. It is marked so that neither of this plugin's refund captors sends it back out; without that mark the loop produces a second corrective invoice in a series filed with the tax authority, where a document is not deleted but corrected with another one.
+* **No article is ever created.** An article is matched by an identity this plugin records for it, or otherwise by its SKU. A reference that two articles share is refused rather than guessed at, and an article this shop does not have is reported back as not found.
+* **A redelivery is discarded, not repeated.** Every delivery carries a deduplication key, claimed in `<prefix>factuarea_inbound` **before** anything is applied, with an insert that either goes in or collides with a unique index - there is no window between checking and acting for two simultaneous deliveries to walk through.
+
+The whole contract - the routes, the signature scheme with its frozen vector, the
+body of each notice, the answer table and what each answer means to the sender, and
+the limits this version declares - is in
+[docs/inbound-contract.md](docs/inbound-contract.md). It is written once, there:
+a contract written twice diverges, and the half that is wrong is never the half you
+are reading.
+
 ## Privacy
 
 **What is captured.** One personal datum: the tax ID the buyer types at checkout.
@@ -163,15 +224,21 @@ whole or truncated. Every option this plugin registers is kept out of the WordPr
 REST settings endpoint, so a settings export does not carry them off the site.
 
 **What uninstalling deletes.** The stored credentials and settings: the Factuarea
-address, the API key, the store identifier, the signing secret, the delivery switch,
-the flag recording that the secret was already shown, and the marker holding the
-outbox table's schema version. They are deleted by name, one by one, from an
-enumerated list rather than by matching a prefix: a prefix match would delete whatever
-anything else happened to name that way, without anybody having decided to.
+address, the Factuarea API address, the API key, the store identifier, the signing
+secret, the delivery switch, the flag recording that the secret was already shown,
+the two receiver switches, and the two markers holding the schema versions of the
+tables. They are deleted by name, one by one, from an enumerated list rather than by
+matching a prefix: a prefix match would delete whatever anything else happened to
+name that way, without anybody having decided to.
+
+It also drops one table, `<prefix>factuarea_inbound`. That one holds the keys of
+incoming deliveries already applied - deduplication bookkeeping of this plugin's
+own, which says nothing to anybody once the plugin is gone.
 
 **What uninstalling does not delete, on purpose.**
 
 * The tax IDs written on orders. They are part of the order, and the order is the shop's accounting record. Spanish invoicing law obliges a merchant to keep the fiscal data of an issued sale, and an issued invoice carries that identifier. Removing a plugin is not a request to alter the books.
+* The fulfilment status, the tracking details, the corrective invoice reference and the refund scope written on orders. Same reason, and the same rule that keeps the correlated invoice identifier: they are part of that order.
 * The outbox table and its rows. Delivered rows are the evidence of which sales reached Factuarea and when. Pending rows are sales not delivered yet; dropping the table would destroy them without telling anybody.
 
 A merchant who wants the table gone can drop it. A merchant who loses their delivery
@@ -201,7 +268,9 @@ on scheduled work. It happens inside the request that took the payment. Only the
 To read a delivery without reading the code, see
 [docs/delivery-contract.md](docs/delivery-contract.md): the headers, the body, how
 the signature is computed, how each kind of answer is classified and what the outbox
-does with each one.
+does with each one. For the other direction -- what may be written into this shop,
+how it authenticates itself and what each answer tells the sender -- see
+[docs/inbound-contract.md](docs/inbound-contract.md).
 
 ## Hooks this plugin exposes
 

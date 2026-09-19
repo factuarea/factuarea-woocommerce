@@ -88,6 +88,12 @@ use Factuarea\WooCommerce\Payload\OrderPayloadBuilder;
  * `woocommerce_order_refunded`, so the two converge into one entry per refund
  * exactly as the two paid routes converge into one entry per order.
  *
+ * One kind of refund is left out of that count: the one this plugin created
+ * itself out of an inbound notice. It carries a mark, both captors read it, and
+ * neither sends it back. The reason the guard has to be in BOTH - and why the
+ * zero-refund fallback below may not swallow the filtered case - is written at
+ * {@see self::refund_identities()}, which is where the filtering happens.
+ *
  * The zero-refund case is handled and it is not hypothetical: a merchant can
  * set an order to Refunded by hand without recording any money back. The
  * receiver has a measured fallback for a body whose `refunds[]` is empty - see
@@ -271,16 +277,67 @@ final class OrderStatusChangedListener {
 	}
 
 	/**
-	 * The identities of the refunds this order carries.
+	 * The identities of the refunds this order carries, EXCEPT the ones this
+	 * plugin created from an inbound notice.
+	 *
+	 * ---------------------------------------------------------------------
+	 * THE ANTI-LOOP GUARD LIVES IN BOTH CAPTORS, AND HERE IS WHY IN THIS ONE
+	 * ---------------------------------------------------------------------
+	 * A refund the platform publishes reaches this shop as an inbound notice,
+	 * and {@see \Factuarea\WooCommerce\Inbound\RefundApplier} records it as a
+	 * REAL WooCommerce refund - which is the point: the merchant has to see the
+	 * money given back in their own order. Creating it fires
+	 * `woocommerce_order_refunded`, and the refund captor guards against that.
+	 *
+	 * That guard alone is not enough, and the gap is this method. A refund for
+	 * the whole amount ALSO moves the order into `refunded`, which is the hook
+	 * of THIS listener, and this method composes one identity per refund of the
+	 * order - the inbound one included. So a guard placed only in the refund
+	 * captor would still send the refund back through the status door.
+	 *
+	 * What comes back is not a duplicate notification. Factuarea would read a
+	 * return of the shop for money it had already returned, and issue a SECOND
+	 * corrective document over the same sale, in a consecutive series filed with
+	 * the tax authority - where a document is never deleted, only corrected with
+	 * a third one. Nothing fails while it happens: the symptom is a corrective
+	 * invoice nobody ordered, found weeks later while squaring a quarter.
+	 *
+	 * The mark is {@see Constants::INBOUND_REFUND_META_KEY}, written on the
+	 * refund object itself before it is saved. Its PRESENCE is the whole test -
+	 * its value is the idempotency key of the notice, and this listener is in no
+	 * position to judge whether a key is well formed.
+	 *
+	 * ---------------------------------------------------------------------
+	 * WHY THE TOTAL-REFUND FALLBACK IS NOT ALLOWED TO CATCH THE FILTERED CASE
+	 * ---------------------------------------------------------------------
+	 * The fallback below answers ONE situation: the order records no refund at
+	 * all, so the body reaches the receiver with an empty `refunds[]` and the
+	 * receiver derives a TOTAL refund identified by the ORDER. Composing the
+	 * same identity here is what makes both sides name the same fact.
+	 *
+	 * When the list is empty because every refund carried the mark, that
+	 * situation does not hold: the order DOES record refunds and the body
+	 * carries them, so the receiver derives nothing. Firing the fallback there
+	 * would send the inbound refund back under a different identity - the loop
+	 * this method just closed, reopened and disguised. Hence the flag: an empty
+	 * list means "nothing to say" when something was filtered out, and "the
+	 * receiver will infer a total refund" only when nothing was.
 	 *
 	 * @param int   $order_id Order that reached the refunded status.
 	 * @param mixed $order    The order object, when the caller passed one.
-	 * @return array<int, string> One identity per refund, never empty.
+	 * @return array<int, string> One identity per refund of the merchant's own making, empty when every refund of the order came from an inbound notice.
 	 */
 	private static function refund_identities( int $order_id, $order ): array {
-		$identities = array();
+		$identities   = array();
+		$inbound_seen = false;
 
 		foreach ( self::refunds_of( $order_id, $order ) as $refund ) {
+			if ( self::came_from_an_inbound_notice( $refund ) ) {
+				$inbound_seen = true;
+
+				continue;
+			}
+
 			$refund_id = (int) $refund->get_id();
 
 			if ( $refund_id > 0 ) {
@@ -288,7 +345,7 @@ final class OrderStatusChangedListener {
 			}
 		}
 
-		if ( array() === $identities ) {
+		if ( array() === $identities && ! $inbound_seen ) {
 			// No refund was recorded against the order, so the body will carry
 			// an empty `refunds[]` and the receiver will fall back to declaring
 			// a TOTAL refund identified by the order. Composing that same
@@ -298,6 +355,39 @@ final class OrderStatusChangedListener {
 		}
 
 		return $identities;
+	}
+
+	/**
+	 * Whether this plugin created the refund out of an inbound notice.
+	 *
+	 * Read by presence and not by truth: the mark holds the idempotency key of
+	 * the notice, and a key of `0` is falsy in PHP. A guard written with
+	 * `empty()` would call such a refund the merchant's and send it back.
+	 *
+	 * The read is deliberately done on the refund object the order handed over,
+	 * without reloading it: the mark is written before the refund is saved, so
+	 * whatever object reaches here already carries it, and a reload inside a
+	 * loop would read the database once per refund of the order.
+	 *
+	 * A value that is not a scalar counts as a mark, and casting it is avoided
+	 * rather than risked. WooCommerce answers `''` for a key it never wrote, and
+	 * a refund the merchant made carries nothing under THIS key, so anything
+	 * else found there came from the inbound half or from something writing in
+	 * its place. Of the two ways of being wrong about it, the one taken is the
+	 * one the merchant can see: a corrective document that has to be reissued,
+	 * instead of a second one filed over a sale that was already corrected.
+	 *
+	 * @param object $refund Refund object of the order.
+	 * @return bool True when the refund carries the anti-loop mark.
+	 */
+	private static function came_from_an_inbound_notice( $refund ): bool {
+		$mark = $refund->get_meta( Constants::INBOUND_REFUND_META_KEY );
+
+		if ( ! is_scalar( $mark ) ) {
+			return array() !== $mark && null !== $mark;
+		}
+
+		return '' !== trim( (string) $mark );
 	}
 
 	/**

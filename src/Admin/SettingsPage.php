@@ -17,12 +17,12 @@ use Factuarea\WooCommerce\Outbox\OutboxRepository;
  * Everything the merchant configures, plus the one notice that keeps a stalled
  * outbox from being silent.
  *
- * The screen holds five settings and one switch: the address deliveries are
+ * The screen holds five settings and three switches: the address deliveries are
  * posted to, the address the v1 reads are made against, the v1 API key, the
- * identifier of this store, the signing secret and whether delivery is switched
- * on. The two addresses are two settings and not one because they are two
- * different hosts - see `Constants::OPTION_API_BASE_URL` for the measurement
- * that separated them.
+ * identifier of this store, the signing secret, whether delivery is switched on
+ * and whether each of the two inbound receivers is. The two addresses are two
+ * settings and not one because they are two different hosts - see
+ * `Constants::OPTION_API_BASE_URL` for the measurement that separated them.
  *
  * The two credentials have two different jobs and neither does the other's -
  * the signing secret only signs outgoing deliveries, the API key only
@@ -66,6 +66,33 @@ use Factuarea\WooCommerce\Outbox\OutboxRepository;
  * has its own nonce and its own capability check. Rotating the API key is
  * pasting a new one; there is no "clear it" control, because the case that needs
  * one is uninstalling, and uninstalling deletes it.
+ *
+ * ---------------------------------------------------------------------------
+ * THE TWO RECEIVERS: OFF BY DEFAULT, ONE SECRET, AND NO CONDITION ON EITHER
+ * ---------------------------------------------------------------------------
+ * The second half of this screen is the other direction: the routes Factuarea
+ * posts to when it has something to tell this shop. Each has its own switch and
+ * both are registered DISABLED, which is the whole reason they are settings at
+ * all - updating a plugin must never start writing into the orders of a shop
+ * that asked for nothing.
+ *
+ * There is no second secret and no second credential field. The signing secret
+ * generated on this screen authenticates both directions, because a second
+ * field is a second place for the merchant to get it wrong and a second value
+ * to rotate; the sender uses the same one on its side.
+ *
+ * The address printed next to each switch is COMPOSED with `rest_url()` from
+ * the address this site actually answers on, and never written out: see
+ * `receiver_url()` for what an address typed into a distributed plugin would be
+ * wrong about.
+ *
+ * NEITHER SWITCH CARRIES A CONDITION, and that is not an omission. The
+ * commercial boundary of this product is the service on the other end, never
+ * the plugin: a receiver withheld until somebody paid would be trialware, which
+ * the plugin directory refuses outright. `scripts/check-no-paywall.php` is the
+ * gate that keeps it true, and `SettingsPageTest` asserts the same thing by
+ * measurement - the option names this surface reads are the two switches and
+ * the secret, and nothing that could stand for an entitlement.
  *
  * ---------------------------------------------------------------------------
  * THE STALLED OUTBOX NOTICE IS THE POINT OF THE WHOLE PACKAGE
@@ -112,9 +139,37 @@ final class SettingsPage {
 	public const OPTION_GROUP = 'factuarea_wc_settings';
 
 	/**
-	 * Identifier of the single settings section.
+	 * Identifier of the connection settings section.
 	 */
 	public const SETTINGS_SECTION = 'factuarea_wc_connection';
+
+	/**
+	 * Identifier of the section holding the two inbound receivers.
+	 *
+	 * A section of its own, and not two more rows under the connection, because
+	 * the two halves of this screen are read at different moments and mean
+	 * opposite things: everything above is what this shop SENDS, and these two
+	 * are what it agrees to be TOLD. A merchant scanning for "why did Factuarea
+	 * not update my order" needs the second half to be findable.
+	 */
+	public const RECEIVERS_SECTION = 'factuarea_wc_receivers';
+
+	/**
+	 * Stored form of a receiver that is switched on.
+	 */
+	public const RECEIVER_ENABLED = '1';
+
+	/**
+	 * Stored form of a receiver that is switched off, which is what both of them
+	 * are registered with.
+	 *
+	 * The same pair of literals the delivery switch already stores, and for the
+	 * same reason: options come back from the database as strings whatever was
+	 * written into them, so a boolean stored here would be read back as `'1'`
+	 * and `''` and the second one would have to be told apart from "never
+	 * written".
+	 */
+	public const RECEIVER_DISABLED = '0';
 
 	/**
 	 * Action name of the signing secret generation, used both as the
@@ -257,14 +312,16 @@ final class SettingsPage {
 	}
 
 	/**
-	 * Registers the five options, the section and the four fields.
+	 * Registers the eight options, the two sections and the seven fields.
 	 *
 	 * Every option is registered with `show_in_rest` set to false. That flag is
 	 * what keeps them out of the settings export: an option exposed through the
 	 * REST settings endpoint is readable by anything holding a token for this
 	 * site and is copied by every tool that migrates a site by exporting its
-	 * settings. None of these five belongs in such an export, and the two
-	 * credentials must never leave the installation at all.
+	 * settings. None of these eight belongs in such an export, the two
+	 * credentials must never leave the installation at all, and a receiver
+	 * switch carried into another site by a migration bundle would switch a
+	 * route on in a shop that never asked for it.
 	 *
 	 * @return void
 	 */
@@ -329,6 +386,26 @@ final class SettingsPage {
 				'default'           => '0',
 			)
 		);
+		register_setting(
+			self::OPTION_GROUP,
+			Constants::OPTION_ORDER_STATUS_RECEIVER_ENABLED,
+			array(
+				'type'              => 'string',
+				'sanitize_callback' => array( $this, 'sanitize_receiver_enabled' ),
+				'show_in_rest'      => false,
+				'default'           => self::RECEIVER_DISABLED,
+			)
+		);
+		register_setting(
+			self::OPTION_GROUP,
+			Constants::OPTION_CATALOG_PUSH_RECEIVER_ENABLED,
+			array(
+				'type'              => 'string',
+				'sanitize_callback' => array( $this, 'sanitize_receiver_enabled' ),
+				'show_in_rest'      => false,
+				'default'           => self::RECEIVER_DISABLED,
+			)
+		);
 
 		add_settings_section(
 			self::SETTINGS_SECTION,
@@ -371,6 +448,28 @@ final class SettingsPage {
 			array( $this, 'render_delivery_enabled_field' ),
 			self::MENU_SLUG,
 			self::SETTINGS_SECTION
+		);
+
+		add_settings_section(
+			self::RECEIVERS_SECTION,
+			__( 'Receivers', 'factuarea-for-woocommerce' ),
+			array( $this, 'render_receivers_section_description' ),
+			self::MENU_SLUG
+		);
+
+		add_settings_field(
+			Constants::OPTION_ORDER_STATUS_RECEIVER_ENABLED,
+			__( 'Order status and refunds', 'factuarea-for-woocommerce' ),
+			array( $this, 'render_order_status_receiver_field' ),
+			self::MENU_SLUG,
+			self::RECEIVERS_SECTION
+		);
+		add_settings_field(
+			Constants::OPTION_CATALOG_PUSH_RECEIVER_ENABLED,
+			__( 'Catalogue, prices and stock', 'factuarea-for-woocommerce' ),
+			array( $this, 'render_catalog_push_receiver_field' ),
+			self::MENU_SLUG,
+			self::RECEIVERS_SECTION
 		);
 	}
 
@@ -613,6 +712,144 @@ final class SettingsPage {
 	}
 
 	/**
+	 * Description under the receivers heading: what the two switches do, why
+	 * they start off, which secret authenticates them, and the two warnings the
+	 * merchant cannot work out on their own.
+	 *
+	 * @return void
+	 */
+	public function render_receivers_section_description(): void {
+		?>
+		<p>
+			<?php
+			echo esc_html__(
+				'These two switches let Factuarea write into this shop. The first one applies the fulfilment status, the tracking details and the refunds of an order; the second one applies the catalogue fields, the price and the stock of an article. They are two switches and not one because wanting your prices published is not the same as wanting your orders written into.',
+				'factuarea-for-woocommerce'
+			);
+			?>
+		</p>
+		<p>
+			<?php
+			echo esc_html__(
+				'Both start switched off, so updating the plugin never changes what a shop already does. Switch on the one you want, then check in Factuarea that the store backing this shop carries the address this site answers on: Factuarea builds the address of each receiver from it, and the two it will build are printed below.',
+				'factuarea-for-woocommerce'
+			);
+			?>
+		</p>
+		<p>
+			<?php
+			echo esc_html__(
+				'Incoming deliveries are authenticated with the signing secret further down this screen - the same one that already signs the deliveries this shop sends. One secret per shop and no second field to fill in, and generating a new one changes both directions at once.',
+				'factuarea-for-woocommerce'
+			);
+			?>
+		</p>
+		<?php
+		// phpcs:ignore WordPress.Security.EscapeOutput.OutputNotEscaped -- Built from escaped parts by the method below, which is where the escaping is asserted.
+		echo $this->missing_secret_notice_markup();
+		// phpcs:ignore WordPress.Security.EscapeOutput.OutputNotEscaped -- Built from escaped parts by the method below, which is where the escaping is asserted.
+		echo $this->plain_permalinks_notice_markup();
+	}
+
+	/**
+	 * The switch of the order status and refund receiver.
+	 *
+	 * @return void
+	 */
+	public function render_order_status_receiver_field(): void {
+		$this->render_receiver_field(
+			Constants::OPTION_ORDER_STATUS_RECEIVER_ENABLED,
+			Constants::INBOUND_ORDER_STATUS_ROUTE,
+			__( 'Apply the order status, the tracking details and the refunds Factuarea publishes', 'factuarea-for-woocommerce' ),
+			__( 'The status is stored next to the native one and shown to the buyer; this receiver never changes the status of the order in WooCommerce, because that would set off the automations of this shop and send an order back to Factuarea. A refund published here is recorded on the order without moving any money through the payment gateway: it was already refunded on the other side.', 'factuarea-for-woocommerce' )
+		);
+	}
+
+	/**
+	 * The switch of the catalogue, price and stock receiver.
+	 *
+	 * @return void
+	 */
+	public function render_catalog_push_receiver_field(): void {
+		$this->render_receiver_field(
+			Constants::OPTION_CATALOG_PUSH_RECEIVER_ENABLED,
+			Constants::INBOUND_CATALOG_PUSH_ROUTE,
+			__( 'Apply the catalogue, price and stock changes Factuarea publishes', 'factuarea-for-woocommerce' ),
+			__( 'Articles are matched by the identity this plugin has already recorded for them, and otherwise by their SKU; nothing is ever created in this shop. The quantity received is the one available for sale, and it is assigned rather than added to what is here.', 'factuarea-for-woocommerce' )
+		);
+	}
+
+	/**
+	 * The warning for the one combination where a receiver rejects everything
+	 * and neither end says why.
+	 *
+	 * A receiver switched on with no signing secret stored answers every
+	 * delivery as unauthenticated, and the answer carries no body and does not
+	 * say which of its three causes happened - deliberately, so that probing it
+	 * learns nothing. The consequence is that the sender reports a rejected
+	 * credential while this screen reports the receiver as on, and both are
+	 * telling the truth. Nothing else on this screen can be inferred from the
+	 * other side, which is why this is the only combination that gets a warning.
+	 *
+	 * @return string The warning markup, or an empty string when the
+	 *                combination does not hold.
+	 */
+	public function missing_secret_notice_markup(): string {
+		$switched_on = self::receiver_enabled( Constants::OPTION_ORDER_STATUS_RECEIVER_ENABLED )
+			|| self::receiver_enabled( Constants::OPTION_CATALOG_PUSH_RECEIVER_ENABLED );
+
+		if ( ! $switched_on || '' !== (string) get_option( Constants::OPTION_SIGNING_SECRET, '' ) ) {
+			return '';
+		}
+
+		return '<div class="notice notice-warning inline"><p><strong>'
+			. esc_html__( 'A receiver is switched on and this shop has no signing secret.', 'factuarea-for-woocommerce' )
+			. '</strong></p><p>'
+			. esc_html__(
+				'Every delivery to it is rejected as unauthenticated, and the answer says nothing more than that, so Factuarea reports a rejected credential while this screen shows the receiver as on. Generate a signing secret below and paste it into the WooCommerce connection of Factuarea that backs this store.',
+				'factuarea-for-woocommerce'
+			)
+			. '</p></div>';
+	}
+
+	/**
+	 * The warning for a site that serves its REST routes as a query argument.
+	 *
+	 * MEASURED against the frozen contract of the sender
+	 * (`backend/docs/architecture/store-order-status-receiver-contract.md` §2,
+	 * read on 2026-09-18): Factuarea builds the address of a receiver by
+	 * appending its route to the base address of the shop, which is the form
+	 * WordPress serves only while a permalink structure is in place. With
+	 * permalinks set to Plain, `rest_url()` hands the route over as a query
+	 * argument instead, and the address the sender composes is one this site
+	 * does not answer on: every notice 404s, the sender classifies it as
+	 * permanent, and nothing on either end names the cause.
+	 *
+	 * The condition is read off the composed address rather than off the
+	 * permalink setting, because it is the address that has to match, and a
+	 * site that renamed its REST prefix breaks in exactly the same way.
+	 *
+	 * @return string The warning markup, or an empty string when the addresses
+	 *                are the form the sender composes.
+	 */
+	public function plain_permalinks_notice_markup(): string {
+		$parts = wp_parse_url( self::receiver_url( Constants::INBOUND_ORDER_STATUS_ROUTE ) );
+
+		if ( ! is_array( $parts ) || '' === (string) ( $parts['query'] ?? '' ) ) {
+			return '';
+		}
+
+		return '<div class="notice notice-warning inline"><p><strong>'
+			. esc_html__( 'This site serves its REST routes as a query argument.', 'factuarea-for-woocommerce' )
+			. '</strong></p><p>'
+			. esc_html__(
+				'That is what WordPress does while the permalinks of a site are set to Plain. Factuarea builds the address of a receiver by adding its route to the address of this shop, so it would post to an address this site does not answer on and every notice would be lost as not found. Choose any permalink setting other than Plain and the two addresses below become the ones Factuarea expects.',
+				'factuarea-for-woocommerce'
+			)
+			. '</p></div>';
+	}
+
+	/**
 	 * Renders the signing secret block: the one-time reveal, or the status and
 	 * the generation button.
 	 *
@@ -722,7 +959,61 @@ final class SettingsPage {
 	 * @return string Either '1' or '0'.
 	 */
 	public function sanitize_delivery_enabled( $value ): string {
-		return ( is_scalar( $value ) && '1' === (string) $value ) ? '1' : '0';
+		return self::switch_value( $value );
+	}
+
+	/**
+	 * Sanitiser of both receiver switches.
+	 *
+	 * The two of them share this one, and it is the same rule the delivery
+	 * switch answers to. Three switches on one form with three sanitisers would
+	 * be three places for "what counts as on" to drift apart, and the drift
+	 * would show up as a receiver that cannot be switched off.
+	 *
+	 * @param mixed $value Submitted value.
+	 * @return string Either self::RECEIVER_ENABLED or self::RECEIVER_DISABLED.
+	 */
+	public function sanitize_receiver_enabled( $value ): string {
+		return self::switch_value( $value );
+	}
+
+	/**
+	 * Whether a receiver is switched on.
+	 *
+	 * The fallback is the disabled value and not `false`, so that "never
+	 * written" - which is every installation the moment it updates - reads
+	 * exactly like "switched off" instead of taking the shape of whatever
+	 * `get_option` returns for an absent option.
+	 *
+	 * Static, and public, because the two receivers are the readers that matter
+	 * and neither of them is an administration screen: they run inside a REST
+	 * callback with no reason to build one of these. Anything reading the switch
+	 * without calling this has to apply the same rule - the stored value equals
+	 * self::RECEIVER_ENABLED, and nothing else is on.
+	 *
+	 * @param string $option Option name of the switch.
+	 * @return bool Whether that receiver is switched on.
+	 */
+	public static function receiver_enabled( string $option ): bool {
+		return self::RECEIVER_ENABLED === (string) get_option( $option, self::RECEIVER_DISABLED );
+	}
+
+	/**
+	 * The whole address a sender posts a receiver's deliveries to.
+	 *
+	 * COMPOSED and never written out. `rest_url()` is the only thing that knows
+	 * what this particular site answers on: the address of the site, the scheme
+	 * it is served under, the REST prefix - which a site may rename - and the
+	 * query-argument form that a site with plain permalinks serves instead of a
+	 * path. An address typed into this screen would be right for the shop it was
+	 * typed for and wrong for the merchant reading it.
+	 *
+	 * @param string $route Route of the receiver, relative to the namespace, as
+	 *                      frozen in `Contract\Constants`.
+	 * @return string Absolute address of that receiver on this site.
+	 */
+	public static function receiver_url( string $route ): string {
+		return rest_url( Constants::INBOUND_REST_NAMESPACE . $route );
 	}
 
 	/**
@@ -959,35 +1250,45 @@ final class SettingsPage {
 			'label'       => __( 'Factuarea for WooCommerce', 'factuarea-for-woocommerce' ),
 			'description' => __( 'How this shop is connected to Factuarea. The API key and the signing secret are never included here, in whole or in part.', 'factuarea-for-woocommerce' ),
 			'fields'      => array(
-				'base_url'         => array(
+				'base_url'              => array(
 					'label' => __( 'Factuarea address', 'factuarea-for-woocommerce' ),
 					'value' => (string) get_option( Constants::OPTION_BASE_URL, '' ),
 					'debug' => (string) get_option( Constants::OPTION_BASE_URL, '' ),
 				),
-				'api_base_url'     => array(
+				'api_base_url'          => array(
 					'label' => __( 'Factuarea API address', 'factuarea-for-woocommerce' ),
 					'value' => self::api_base_url(),
 					'debug' => self::api_base_url(),
 				),
-				'store_id'         => array(
+				'store_id'              => array(
 					'label' => __( 'Store identifier', 'factuarea-for-woocommerce' ),
 					'value' => (string) get_option( Constants::OPTION_STORE_ID, '' ),
 					'debug' => (string) get_option( Constants::OPTION_STORE_ID, '' ),
 				),
-				'delivery_enabled' => array(
+				'delivery_enabled'      => array(
 					'label' => __( 'Delivery', 'factuarea-for-woocommerce' ),
 					'value' => '1' === (string) get_option( Constants::OPTION_DELIVERY_ENABLED, '0' )
 						? __( 'On', 'factuarea-for-woocommerce' )
 						: __( 'Off', 'factuarea-for-woocommerce' ),
 					'debug' => '1' === (string) get_option( Constants::OPTION_DELIVERY_ENABLED, '0' ) ? 'on' : 'off',
 				),
-				'api_key'          => array(
+				'order_status_receiver' => array(
+					'label' => __( 'Order status receiver', 'factuarea-for-woocommerce' ),
+					'value' => $this->switch_status( Constants::OPTION_ORDER_STATUS_RECEIVER_ENABLED ),
+					'debug' => self::receiver_enabled( Constants::OPTION_ORDER_STATUS_RECEIVER_ENABLED ) ? 'on' : 'off',
+				),
+				'catalog_push_receiver' => array(
+					'label' => __( 'Catalogue, price and stock receiver', 'factuarea-for-woocommerce' ),
+					'value' => $this->switch_status( Constants::OPTION_CATALOG_PUSH_RECEIVER_ENABLED ),
+					'debug' => self::receiver_enabled( Constants::OPTION_CATALOG_PUSH_RECEIVER_ENABLED ) ? 'on' : 'off',
+				),
+				'api_key'               => array(
 					'label'   => __( 'API key', 'factuarea-for-woocommerce' ),
 					'value'   => $this->credential_status( Constants::OPTION_API_KEY ),
 					'debug'   => $this->credential_status( Constants::OPTION_API_KEY ),
 					'private' => true,
 				),
-				'signing_secret'   => array(
+				'signing_secret'        => array(
 					'label'   => __( 'Signing secret', 'factuarea-for-woocommerce' ),
 					'value'   => $this->credential_status( Constants::OPTION_SIGNING_SECRET ),
 					'debug'   => $this->credential_status( Constants::OPTION_SIGNING_SECRET ),
@@ -1080,6 +1381,81 @@ final class SettingsPage {
 		return '' === (string) get_option( $option, '' )
 			? __( 'Not configured', 'factuarea-for-woocommerce' )
 			: __( 'Configured', 'factuarea-for-woocommerce' );
+	}
+
+	/**
+	 * Whether a switch is on, written for a person reading Site Health.
+	 *
+	 * @param string $option Option name of the switch.
+	 * @return string The status, translated.
+	 */
+	private function switch_status( string $option ): string {
+		return self::receiver_enabled( $option )
+			? __( 'On', 'factuarea-for-woocommerce' )
+			: __( 'Off', 'factuarea-for-woocommerce' );
+	}
+
+	/**
+	 * The one rule every switch of this screen answers to.
+	 *
+	 * Anything that is not the stored "on" is off, including a value that is
+	 * not a scalar at all: a checkbox that was not ticked posts nothing, and an
+	 * option name arriving with an array under it came from somewhere that is
+	 * not this form.
+	 *
+	 * @param mixed $value Submitted value.
+	 * @return string Either self::RECEIVER_ENABLED or self::RECEIVER_DISABLED.
+	 */
+	private static function switch_value( $value ): string {
+		return ( is_scalar( $value ) && self::RECEIVER_ENABLED === (string) $value )
+			? self::RECEIVER_ENABLED
+			: self::RECEIVER_DISABLED;
+	}
+
+	/**
+	 * Renders one receiver switch, its address and its description.
+	 *
+	 * The hidden input before the checkbox is the same device the delivery
+	 * switch uses and for the same reason: an unticked checkbox posts nothing
+	 * at all, so without it the switch could be turned on and never off.
+	 *
+	 * WHY THE ADDRESS IS PRINTED AS "WHERE FACTUAREA DELIVERS" AND NOT AS
+	 * "PASTE THIS THERE". MEASURED on 2026-09-18 on the platform: the store form
+	 * asks for the address of the SHOP (`ecommerce_stores.remote_base_url`, the
+	 * field labelled as the address of your shop) and Factuarea builds each
+	 * receiver address from it, one route at a time
+	 * (`store-order-status-receiver-contract.md` §2). A screen that told the
+	 * merchant to paste this whole address into that field would have them paste
+	 * an address with a path into a field that rejects one. What the merchant
+	 * needs from this line is the address to CHECK when a notice does not
+	 * arrive, and that is what it says.
+	 *
+	 * @param string $option       Option name of the switch.
+	 * @param string $route        Route of the receiver, from `Contract\Constants`.
+	 * @param string $switch_label Label next to the checkbox.
+	 * @param string $description  What this receiver does, in one paragraph.
+	 * @return void
+	 */
+	private function render_receiver_field( string $option, string $route, string $switch_label, string $description ): void {
+		$enabled = self::receiver_enabled( $option );
+		?>
+		<input type="hidden" name="<?php echo esc_attr( $option ); ?>" value="<?php echo esc_attr( self::RECEIVER_DISABLED ); ?>" />
+		<label for="<?php echo esc_attr( $option ); ?>">
+			<input
+				type="checkbox"
+				id="<?php echo esc_attr( $option ); ?>"
+				name="<?php echo esc_attr( $option ); ?>"
+				value="<?php echo esc_attr( self::RECEIVER_ENABLED ); ?>"
+				<?php echo $enabled ? ' checked="checked"' : ''; ?>
+			/>
+			<?php echo esc_html( $switch_label ); ?>
+		</label>
+		<p class="description">
+			<?php echo esc_html__( 'Factuarea delivers to this address, built from the address of this shop:', 'factuarea-for-woocommerce' ); ?>
+			<code><?php echo esc_url( self::receiver_url( $route ) ); ?></code>
+		</p>
+		<p class="description"><?php echo esc_html( $description ); ?></p>
+		<?php
 	}
 
 	/**

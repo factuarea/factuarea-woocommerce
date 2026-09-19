@@ -25,12 +25,12 @@ use ReflectionClass;
 /**
  * What this test holds.
  *
- * Five groups, and the fifth is the one that would be tempting to leave out.
+ * Six groups, and the fifth is the one that would be tempting to leave out.
  *
- *  1. REGISTRATION. The screen, the six options and the five fields are
+ *  1. REGISTRATION. The screen, the eight options and the seven fields are
  *     registered, in one group, with the shop manager capability - and every
  *     option carries `show_in_rest` set to false, which is what keeps the two
- *     credentials out of a settings export. Two of the six are ADDRESSES, and
+ *     credentials out of a settings export. Two of the eight are ADDRESSES, and
  *     the pair is asserted apart: deliveries go to one host and the v1 reads to
  *     another, so a screen with one address field would make one of the two
  *     answer 404 whichever value the merchant typed.
@@ -60,6 +60,16 @@ use ReflectionClass;
  *     debug entry added later by somebody who did not read the prohibition. The
  *     search looks for the WHOLE value and for a four-character fragment of it,
  *     because a truncated secret is not a safer secret, only a shorter one.
+ *
+ *  6. THE TWO RECEIVERS. Their switches are registered disabled, they answer to
+ *     one rule, the address printed next to each one is COMPOSED from the
+ *     address of this site rather than written out, the screen warns about the
+ *     one combination that rejects everything silently - a receiver switched on
+ *     with no signing secret stored - and nothing on that surface consults an
+ *     option other than the switch itself and the secret. The last one is the
+ *     no-paywall promise written as a measurement instead of as a word list:
+ *     a receiver gated behind a payment would have to read something to know
+ *     whether it was paid for, and this reads the option names it asks for.
  */
 final class SettingsPageTest extends TestCase {
 
@@ -112,6 +122,25 @@ final class SettingsPageTest extends TestCase {
 	private array $submenu_pages = array();
 
 	/**
+	 * What the double of `rest_url` prepends to a route.
+	 *
+	 * It is a property rather than a constant so that a test can move this site
+	 * to another address - or to the query-argument form a site with plain
+	 * permalinks serves - and read what the screen prints afterwards. An address
+	 * that does not move when the site moves is an address written by hand.
+	 *
+	 * @var string
+	 */
+	private string $rest_base = 'https://shop.example/wp-json/';
+
+	/**
+	 * Every option name `get_option` was asked for, in the order it was asked.
+	 *
+	 * @var list<string>
+	 */
+	private array $read_options = array();
+
+	/**
 	 * Installs the doubles of the WordPress functions the class under test
 	 * reaches for.
 	 *
@@ -136,11 +165,15 @@ final class SettingsPageTest extends TestCase {
 		$this->registered_fields   = array();
 		$this->registered_sections = array();
 		$this->submenu_pages       = array();
+		$this->rest_base           = 'https://shop.example/wp-json/';
+		$this->read_options        = array();
 
 		$this->capture_admin_registrations();
 
 		Functions\when( 'get_option' )->alias(
 			function ( string $name, $default_value = false ) {
+				$this->read_options[] = $name;
+
 				return array_key_exists( $name, $this->options ) ? $this->options[ $name ] : $default_value;
 			}
 		);
@@ -161,6 +194,24 @@ final class SettingsPageTest extends TestCase {
 		Functions\when( 'settings_fields' )->justReturn( null );
 		Functions\when( 'wp_nonce_field' )->justReturn( null );
 		Functions\when( 'settings_errors' )->justReturn( null );
+
+		/*
+		 * What WordPress does: with a permalink structure in place it hangs the
+		 * route off the REST prefix of the site, and with plain permalinks it
+		 * hands the route over as a query argument instead. The double composes
+		 * from a base this test can move, which is the only way to tell an
+		 * address that is built from this site apart from one that is typed.
+		 */
+		Functions\when( 'rest_url' )->alias(
+			function ( string $path = '' ): string {
+				return $this->rest_base . ltrim( $path, '/' );
+			}
+		);
+		Functions\when( 'wp_parse_url' )->alias(
+			static function ( string $url ) {
+				return parse_url( $url ); // phpcs:ignore WordPress.WP.AlternativeFunctions.parse_url_parse_url -- This IS the double of the alternative function.
+			}
+		);
 
 		/*
 		 * `do_settings_sections` prints what WordPress would print: the section
@@ -226,11 +277,11 @@ final class SettingsPageTest extends TestCase {
 	}
 
 	/**
-	 * The six options are registered, in one group, each with a sanitiser.
+	 * The eight options are registered, in one group, each with a sanitiser.
 	 *
 	 * @return void
 	 */
-	public function test_the_six_settings_are_registered_with_a_sanitiser_each(): void {
+	public function test_the_eight_settings_are_registered_with_a_sanitiser_each(): void {
 		( new SettingsPage() )->register_settings();
 
 		$expected = array(
@@ -240,12 +291,14 @@ final class SettingsPageTest extends TestCase {
 			Constants::OPTION_STORE_ID,
 			Constants::OPTION_SIGNING_SECRET,
 			Constants::OPTION_DELIVERY_ENABLED,
+			Constants::OPTION_ORDER_STATUS_RECEIVER_ENABLED,
+			Constants::OPTION_CATALOG_PUSH_RECEIVER_ENABLED,
 		);
 
 		$this->assertSame(
 			$expected,
 			array_keys( $this->registered_settings ),
-			'The screen has to register exactly the six options the plugin stores on this screen, and no others: WordPress saves every option registered against a submitted page, so an option registered here that nothing renders is an option that gets overwritten on every save.'
+			'The screen has to register exactly the eight options the plugin stores on this screen, and no others: WordPress saves every option registered against a submitted page, so an option registered here that nothing renders is an option that gets overwritten on every save.'
 		);
 
 		foreach ( $expected as $option ) {
@@ -295,7 +348,8 @@ final class SettingsPageTest extends TestCase {
 	}
 
 	/**
-	 * The section and the five visible fields are registered on the screen.
+	 * The two sections and the seven visible fields are registered on the
+	 * screen, each field in the section it belongs to.
 	 *
 	 * The signing secret is deliberately NOT among them: it has no input,
 	 * because the only thing that sets it is the generation action.
@@ -305,27 +359,51 @@ final class SettingsPageTest extends TestCase {
 	 * so one field could not hold both and the merchant has to be able to see
 	 * and correct each.
 	 *
+	 * The two receiver switches sit in a section of their own, and the section
+	 * is what makes the difference readable: everything above it is what this
+	 * shop sends, and the two below are what it agrees to be told.
+	 *
 	 * @return void
 	 */
-	public function test_the_five_visible_fields_are_registered_on_the_screen(): void {
+	public function test_the_seven_visible_fields_are_registered_in_their_two_sections(): void {
 		( new SettingsPage() )->register_settings();
 
+		$expected = array(
+			Constants::OPTION_BASE_URL                      => SettingsPage::SETTINGS_SECTION,
+			Constants::OPTION_API_BASE_URL                  => SettingsPage::SETTINGS_SECTION,
+			Constants::OPTION_API_KEY                       => SettingsPage::SETTINGS_SECTION,
+			Constants::OPTION_STORE_ID                      => SettingsPage::SETTINGS_SECTION,
+			Constants::OPTION_DELIVERY_ENABLED              => SettingsPage::SETTINGS_SECTION,
+			Constants::OPTION_ORDER_STATUS_RECEIVER_ENABLED => SettingsPage::RECEIVERS_SECTION,
+			Constants::OPTION_CATALOG_PUSH_RECEIVER_ENABLED => SettingsPage::RECEIVERS_SECTION,
+		);
+
 		$this->assertSame(
-			array(
-				Constants::OPTION_BASE_URL,
-				Constants::OPTION_API_BASE_URL,
-				Constants::OPTION_API_KEY,
-				Constants::OPTION_STORE_ID,
-				Constants::OPTION_DELIVERY_ENABLED,
-			),
+			array_keys( $expected ),
 			array_keys( $this->registered_fields ),
-			'The screen renders five inputs. The signing secret is not one of them: it is generated, shown once and never edited by hand.'
+			'The screen renders seven inputs. The signing secret is not one of them: it is generated, shown once and never edited by hand.'
+		);
+
+		$this->assertNotSame(
+			SettingsPage::SETTINGS_SECTION,
+			SettingsPage::RECEIVERS_SECTION,
+			'The receivers are a section of their own, so the two identifiers cannot be the same string.'
 		);
 
 		foreach ( $this->registered_fields as $field => $registration ) {
 			$this->assertSame( SettingsPage::MENU_SLUG, $registration['page'], sprintf( 'Field "%s" has to be registered on this plugin\'s screen.', $field ) );
-			$this->assertSame( SettingsPage::SETTINGS_SECTION, $registration['section'], sprintf( 'Field "%s" has to belong to the connection section.', $field ) );
+			$this->assertSame( $expected[ $field ], $registration['section'], sprintf( 'Field "%s" is registered in the wrong section.', $field ) );
 			$this->assertNotSame( '', $registration['title'], sprintf( 'Field "%s" has to carry a label.', $field ) );
+		}
+
+		$this->assertCount(
+			2,
+			$this->registered_sections,
+			'Two sections, and both on this screen: the connection, and the two receivers.'
+		);
+
+		foreach ( $this->registered_sections as $section ) {
+			$this->assertSame( SettingsPage::MENU_SLUG, $section['page'] );
 		}
 	}
 
@@ -924,6 +1002,392 @@ final class SettingsPageTest extends TestCase {
 	}
 
 	/**
+	 * The two receiver switches are registered disabled and answer to one rule.
+	 *
+	 * The default is asserted as the constant and as the literal behind it,
+	 * because "disabled by default" is the promise that an update changes
+	 * nothing in a shop that touched nothing, and a default of `'1'` spelled by
+	 * accident would keep every assertion about the constant green.
+	 *
+	 * @return void
+	 */
+	public function test_the_two_receivers_are_registered_disabled_and_share_one_switch_rule(): void {
+		( new SettingsPage() )->register_settings();
+
+		$this->assertSame( '0', SettingsPage::RECEIVER_DISABLED, 'The stored form of a switched-off receiver is the same one the delivery switch uses.' );
+		$this->assertSame( '1', SettingsPage::RECEIVER_ENABLED );
+
+		foreach ( array( Constants::OPTION_ORDER_STATUS_RECEIVER_ENABLED, Constants::OPTION_CATALOG_PUSH_RECEIVER_ENABLED ) as $option ) {
+			$this->assertSame(
+				SettingsPage::RECEIVER_DISABLED,
+				$this->registered_settings[ $option ]['args']['default'] ?? null,
+				sprintf( 'Receiver option "%s" has to be registered disabled: updating the plugin must not start writing into a shop that asked for nothing.', $option )
+			);
+			$this->assertFalse(
+				$this->registered_settings[ $option ]['args']['show_in_rest'],
+				sprintf( 'Receiver option "%s" is a switch over a route that writes into orders; it has no business travelling in a settings export.', $option )
+			);
+		}
+
+		$this->assertSame(
+			$this->registered_settings[ Constants::OPTION_ORDER_STATUS_RECEIVER_ENABLED ]['args']['sanitize_callback'],
+			$this->registered_settings[ Constants::OPTION_CATALOG_PUSH_RECEIVER_ENABLED ]['args']['sanitize_callback'],
+			'One rule for both switches. Two sanitisers for two switches is two places for "what counts as on" to drift apart.'
+		);
+	}
+
+	/**
+	 * A shop that never touched these settings has both receivers off, and the
+	 * screen renders them off.
+	 *
+	 * The options are ABSENT here rather than stored as zero, which is the state
+	 * of every installation that updates the plugin: nothing wrote them yet, so
+	 * what decides is the fallback the readers pass.
+	 *
+	 * @return void
+	 */
+	public function test_a_shop_that_touched_nothing_has_both_receivers_switched_off(): void {
+		unset(
+			$this->options[ Constants::OPTION_ORDER_STATUS_RECEIVER_ENABLED ],
+			$this->options[ Constants::OPTION_CATALOG_PUSH_RECEIVER_ENABLED ]
+		);
+		$this->options[ Constants::OPTION_DELIVERY_ENABLED ] = '0';
+
+		$this->assertFalse( SettingsPage::receiver_enabled( Constants::OPTION_ORDER_STATUS_RECEIVER_ENABLED ) );
+		$this->assertFalse( SettingsPage::receiver_enabled( Constants::OPTION_CATALOG_PUSH_RECEIVER_ENABLED ) );
+
+		$markup = $this->render( new SettingsPage() );
+
+		$this->assertSame(
+			0,
+			substr_count( $markup, 'checked="checked"' ),
+			'With the delivery switch off in this shop and both receivers never written, nothing on the screen may render as ticked.'
+		);
+	}
+
+	/**
+	 * A stored switch is read back as on, and anything that is not the stored
+	 * "on" is off.
+	 *
+	 * @return void
+	 */
+	public function test_the_receiver_switch_stores_one_of_two_values_by_the_same_rule_as_delivery(): void {
+		$page = new SettingsPage();
+
+		$this->assertSame( SettingsPage::RECEIVER_ENABLED, $page->sanitize_receiver_enabled( '1' ) );
+		$this->assertSame( SettingsPage::RECEIVER_DISABLED, $page->sanitize_receiver_enabled( '0' ) );
+		$this->assertSame(
+			SettingsPage::RECEIVER_DISABLED,
+			$page->sanitize_receiver_enabled( null ),
+			'An unticked checkbox posts nothing at all. The hidden input makes it post a zero, and the sanitiser turns anything else into one too, so a receiver can be switched off and not only on.'
+		);
+		$this->assertSame( SettingsPage::RECEIVER_DISABLED, $page->sanitize_receiver_enabled( 'yes' ) );
+		$this->assertSame( SettingsPage::RECEIVER_DISABLED, $page->sanitize_receiver_enabled( array( '1' ) ) );
+
+		foreach ( array( '1', '0', null, 'yes', array( '1' ) ) as $submitted ) {
+			$this->assertSame(
+				$page->sanitize_delivery_enabled( $submitted ),
+				$page->sanitize_receiver_enabled( $submitted ),
+				'The three switches of this screen answer to one rule, so that "on" cannot come to mean two things on one form.'
+			);
+		}
+
+		$this->options[ Constants::OPTION_ORDER_STATUS_RECEIVER_ENABLED ] = SettingsPage::RECEIVER_ENABLED;
+
+		$this->assertTrue( SettingsPage::receiver_enabled( Constants::OPTION_ORDER_STATUS_RECEIVER_ENABLED ) );
+		$this->assertFalse( SettingsPage::receiver_enabled( Constants::OPTION_CATALOG_PUSH_RECEIVER_ENABLED ) );
+	}
+
+	/**
+	 * Each receiver prints the whole address a sender posts to, built from the
+	 * frozen route and from the address this site answers on.
+	 *
+	 * @return void
+	 */
+	public function test_each_receiver_shows_the_address_composed_from_the_address_of_this_site(): void {
+		$status  = SettingsPage::receiver_url( Constants::INBOUND_ORDER_STATUS_ROUTE );
+		$catalog = SettingsPage::receiver_url( Constants::INBOUND_CATALOG_PUSH_ROUTE );
+
+		$this->assertSame( 'https://shop.example/wp-json/factuarea/v1/order-status', $status );
+		$this->assertSame( 'https://shop.example/wp-json/factuarea/v1/catalog-push', $catalog );
+		$this->assertNotSame( $status, $catalog, 'Two receivers, two addresses: one of them printed for both is a merchant pasting the wrong one into Factuarea.' );
+
+		$markup = $this->render( new SettingsPage() );
+
+		$this->assertStringContainsString( $status, $markup );
+		$this->assertStringContainsString( $catalog, $markup );
+	}
+
+	/**
+	 * Move the site and the printed addresses move with it.
+	 *
+	 * This is the assertion behind "composed, not written out". An address typed
+	 * into the screen would pass every check above and keep pointing at the
+	 * shop it was typed for.
+	 *
+	 * @return void
+	 */
+	public function test_the_receiver_addresses_follow_the_site_when_it_moves(): void {
+		$this->rest_base = 'https://another-shop.example/some/path/wp-json/';
+
+		$status = SettingsPage::receiver_url( Constants::INBOUND_ORDER_STATUS_ROUTE );
+
+		$this->assertSame( 'https://another-shop.example/some/path/wp-json/factuarea/v1/order-status', $status );
+		$this->assertStringEndsWith(
+			Constants::INBOUND_ORDER_STATUS_ROUTE,
+			$status,
+			'The route half comes from the frozen contract, so the address ends exactly with it.'
+		);
+		$this->assertStringContainsString( $status, $this->render( new SettingsPage() ) );
+	}
+
+	/**
+	 * The help next to the receivers says the signing secret is the one that
+	 * already signs what this shop sends, and that there is no second field.
+	 *
+	 * @return void
+	 */
+	public function test_the_receivers_section_says_the_signing_secret_is_the_one_that_already_signs(): void {
+		$markup = $this->capture( static fn ( SettingsPage $page ) => $page->render_receivers_section_description(), new SettingsPage() );
+
+		$this->assertStringContainsString( 'signing secret', $markup );
+		$this->assertStringContainsString(
+			'no second field',
+			$markup,
+			'A merchant who is not told the secret is shared looks for a field to paste an inbound secret into, does not find one, and concludes the receiver is unfinished.'
+		);
+		$this->assertStringContainsString(
+			'switched off',
+			$markup,
+			'The section has to say the receivers start off; it is the sentence that explains why nothing happened after the update.'
+		);
+	}
+
+	/**
+	 * The warning appears for the one combination that rejects everything, and
+	 * for no other.
+	 *
+	 * @return void
+	 */
+	public function test_the_missing_secret_warning_appears_only_with_a_receiver_on_and_no_secret(): void {
+		$page = new SettingsPage();
+
+		$this->assertSame( '', $page->missing_secret_notice_markup(), 'Both receivers off and a secret stored: nothing to warn about.' );
+
+		$this->options[ Constants::OPTION_SIGNING_SECRET ] = '';
+		$this->assertSame(
+			'',
+			$page->missing_secret_notice_markup(),
+			'No secret and no receiver switched on is the state of a shop that only delivers outwards. Warning there would be noise on a screen that is fine.'
+		);
+
+		$this->options[ Constants::OPTION_ORDER_STATUS_RECEIVER_ENABLED ] = SettingsPage::RECEIVER_ENABLED;
+		$warning = $page->missing_secret_notice_markup();
+
+		$this->assertStringContainsString( 'signing secret', $warning );
+		$this->assertStringContainsString( 'notice-warning', $warning );
+
+		$this->options[ Constants::OPTION_SIGNING_SECRET ] = self::STORED_SECRET;
+		$this->assertSame( '', $page->missing_secret_notice_markup(), 'A receiver switched on with a secret stored is the working state.' );
+
+		$this->options[ Constants::OPTION_ORDER_STATUS_RECEIVER_ENABLED ] = SettingsPage::RECEIVER_DISABLED;
+		$this->options[ Constants::OPTION_CATALOG_PUSH_RECEIVER_ENABLED ] = SettingsPage::RECEIVER_ENABLED;
+		$this->options[ Constants::OPTION_SIGNING_SECRET ]                = '';
+
+		$this->assertNotSame(
+			'',
+			$page->missing_secret_notice_markup(),
+			'The warning is about either receiver. Watching only the first one would leave the catalogue receiver rejecting every batch with nothing on screen.'
+		);
+		$this->assert_carries_no_credential( $page->missing_secret_notice_markup(), 'the missing secret warning' );
+	}
+
+	/**
+	 * The warning is printed on the screen and not only returned by a method.
+	 *
+	 * @return void
+	 */
+	public function test_the_missing_secret_warning_is_printed_on_the_screen(): void {
+		$this->options[ Constants::OPTION_SIGNING_SECRET ]                = '';
+		$this->options[ Constants::OPTION_SECRET_REVEALED ]               = '';
+		$this->options[ Constants::OPTION_ORDER_STATUS_RECEIVER_ENABLED ] = SettingsPage::RECEIVER_ENABLED;
+
+		$markup = $this->render( new SettingsPage() );
+
+		$this->assertStringContainsString(
+			'has no signing secret',
+			$markup,
+			'A warning that is only reachable through a method nobody calls is a warning the merchant never reads.'
+		);
+	}
+
+	/**
+	 * A site serving its REST routes as a query argument is told so, because
+	 * the sender composes the address the other way.
+	 *
+	 * MEASURED against the frozen contract of the sender
+	 * (`backend/docs/architecture/store-order-status-receiver-contract.md` §2,
+	 * read 2026-09-18): the platform appends the route to the base address of
+	 * the shop, so a site whose REST routes only answer as a query argument -
+	 * which is what WordPress serves while permalinks are set to Plain - is
+	 * unreachable, and every notice 404s with nothing on screen to explain it.
+	 *
+	 * @return void
+	 */
+	public function test_the_screen_warns_when_this_site_serves_rest_as_a_query_argument(): void {
+		$page = new SettingsPage();
+
+		$this->assertSame( '', $page->plain_permalinks_notice_markup(), 'The usual site serves its routes as a path and needs no warning.' );
+
+		$this->rest_base = 'https://shop.example/?rest_route=/';
+
+		$warning = $page->plain_permalinks_notice_markup();
+
+		$this->assertStringContainsString( 'notice-warning', $warning );
+		$this->assertStringContainsString( 'permalink', $warning );
+		$this->assertStringContainsString(
+			'permalink',
+			$this->render( new SettingsPage() ),
+			'The warning belongs on the screen next to the addresses it is about.'
+		);
+	}
+
+	/**
+	 * Nothing on the receivers surface consults anything but its own switch and
+	 * the secret.
+	 *
+	 * This is the no-paywall promise of this screen written as a measurement.
+	 * A receiver held back until somebody paid would have to READ something to
+	 * find out whether they had - an entitlement, a plan, a licence flag - and
+	 * what this asserts is the exact list of option names the surface asks for.
+	 * The authoritative gate is `scripts/check-no-paywall.php`; this one fails
+	 * in the phase that adds the switches, which is where the mistake would be
+	 * made.
+	 *
+	 * @return void
+	 */
+	public function test_the_receivers_consult_nothing_but_their_own_switch_and_the_secret(): void {
+		$page = new SettingsPage();
+
+		$this->read_options = array();
+		$this->capture( static fn ( SettingsPage $subject ) => $subject->render_order_status_receiver_field(), $page );
+
+		$this->assertSame(
+			array( Constants::OPTION_ORDER_STATUS_RECEIVER_ENABLED ),
+			array_values( array_unique( $this->read_options ) ),
+			'The order status switch is decided by its own option and by nothing else.'
+		);
+
+		$this->read_options = array();
+		$this->capture( static fn ( SettingsPage $subject ) => $subject->render_catalog_push_receiver_field(), $page );
+
+		$this->assertSame(
+			array( Constants::OPTION_CATALOG_PUSH_RECEIVER_ENABLED ),
+			array_values( array_unique( $this->read_options ) ),
+			'The catalogue switch is decided by its own option and by nothing else.'
+		);
+
+		/*
+		 * The help is swept with each receiver switched on in turn, because the
+		 * warning stops reading as soon as it has an answer: with both off it
+		 * never reaches the secret, and with the first one on it never reaches
+		 * the second switch. The union of the two sweeps is everything this
+		 * surface can ask for.
+		 */
+		$asked = array();
+
+		foreach ( array( Constants::OPTION_ORDER_STATUS_RECEIVER_ENABLED, Constants::OPTION_CATALOG_PUSH_RECEIVER_ENABLED ) as $switched_on ) {
+			$this->options[ Constants::OPTION_ORDER_STATUS_RECEIVER_ENABLED ] = SettingsPage::RECEIVER_DISABLED;
+			$this->options[ Constants::OPTION_CATALOG_PUSH_RECEIVER_ENABLED ] = SettingsPage::RECEIVER_DISABLED;
+			$this->options[ $switched_on ]                                    = SettingsPage::RECEIVER_ENABLED;
+
+			$this->read_options = array();
+			$this->capture( static fn ( SettingsPage $subject ) => $subject->render_receivers_section_description(), $page );
+
+			$asked = array_merge( $asked, $this->read_options );
+		}
+
+		$asked = array_values( array_unique( $asked ) );
+		$allowed = array(
+			Constants::OPTION_ORDER_STATUS_RECEIVER_ENABLED,
+			Constants::OPTION_CATALOG_PUSH_RECEIVER_ENABLED,
+			Constants::OPTION_SIGNING_SECRET,
+		);
+
+		sort( $asked );
+		sort( $allowed );
+
+		$this->assertSame(
+			$allowed,
+			$asked,
+			'The help and its warning read the two switches and the secret. Any other option name read here is something this screen would be consulting before it agreed to receive.'
+		);
+	}
+
+	/**
+	 * The diagnostic block reports both receivers, and still carries no
+	 * credential in any form.
+	 *
+	 * @return void
+	 */
+	public function test_the_diagnostic_block_reports_both_receivers_without_a_credential(): void {
+		$this->options[ Constants::OPTION_ORDER_STATUS_RECEIVER_ENABLED ] = SettingsPage::RECEIVER_ENABLED;
+
+		$fields = ( new SettingsPage() )->debug_information( array() )[ SettingsPage::DEBUG_INFORMATION_SECTION ]['fields'];
+
+		$this->assertSame( 'on', $fields['order_status_receiver']['debug'] ?? null, 'Whether a receiver is switched on is the first thing a support thread about a notice that never arrived needs.' );
+		$this->assertSame( 'off', $fields['catalog_push_receiver']['debug'] ?? null );
+		$this->assertSame( 'On', $fields['order_status_receiver']['value'] ?? null );
+		$this->assertSame( 'Off', $fields['catalog_push_receiver']['value'] ?? null );
+
+		$this->assert_carries_no_credential(
+			$this->flatten( ( new SettingsPage() )->debug_information( array() )[ SettingsPage::DEBUG_INFORMATION_SECTION ] ),
+			'the Site Health diagnostic block with the receivers reported'
+		);
+	}
+
+	/**
+	 * Every translated string of the screen goes through the text domain of the
+	 * package, and that domain is the identifier of the package itself.
+	 *
+	 * The domain is MEASURED off the plugin header and off the name of the entry
+	 * point rather than compared with a literal written here: WordPress resolves
+	 * translations by matching the domain against the directory the plugin ships
+	 * in, so a domain that stops matching the package identifier does not fail -
+	 * it silently serves English to every merchant who installed a translation.
+	 *
+	 * @return void
+	 */
+	public function test_every_translated_string_of_the_screen_uses_the_text_domain_of_the_package(): void {
+		$root     = dirname( __DIR__, 2 );
+		$manifest = (string) file_get_contents( $root . '/factuarea-for-woocommerce.php' );
+
+		$this->assertSame(
+			1,
+			preg_match( '/^\s*\*\s*Text Domain:\s*(\S+)\s*$/m', $manifest, $declared ),
+			'The plugin header has to declare a text domain; WordPress loads no translation without one.'
+		);
+
+		$domain = $declared[1];
+
+		$this->assertSame(
+			basename( $root . '/factuarea-for-woocommerce.php', '.php' ),
+			$domain,
+			'The declared domain has to be the identifier of the package, which is what the directory and the entry point are named after.'
+		);
+		$this->assertSame( SettingsPage::MENU_SLUG, $domain, 'The screen slug is that same identifier, so the two cannot drift apart unnoticed.' );
+
+		$domains = $this->translation_domains_of( $root . '/src/Admin/SettingsPage.php' );
+
+		$this->assertNotSame( array(), $domains, 'The screen is made of user-facing strings; finding none means the sweep below stopped reading them.' );
+		$this->assertSame(
+			array( $domain ),
+			$domains,
+			sprintf( 'Every translated string of the screen has to carry "%s" as its domain. A call with another domain, or with none at all, is a string that never reaches a translator.', $domain )
+		);
+	}
+
+	/**
 	 * Renders the whole screen - the page and the fields WordPress prints inside
 	 * it - and returns what it printed.
 	 *
@@ -1005,6 +1469,79 @@ final class SettingsPageTest extends TestCase {
 		}
 
 		return is_scalar( $value ) ? (string) $value : '';
+	}
+
+	/**
+	 * Every text domain a translation call of a file hands over, once each.
+	 *
+	 * Read with the PHP tokeniser and not with a regular expression, for the
+	 * reason `scripts/check-no-paywall.php` writes out at length: this
+	 * repository spreads a translation call over four lines and puts the domain
+	 * on one of its own, and a pattern that survived that would also match the
+	 * word inside a docblock. The tokeniser walks the call, keeps the string
+	 * literals that belong to it and takes the LAST one, which is where every
+	 * translation function of WordPress carries the domain - so a call that
+	 * forgot it hands back its own message and fails the comparison, which is
+	 * exactly what should happen.
+	 *
+	 * @param string $path Absolute path of the file to read.
+	 * @return list<string> The domains found, in order of first appearance.
+	 */
+	private function translation_domains_of( string $path ): array {
+		$translators = array( '__', '_e', '_n', '_x', '_nx', '_n_noop', '_nx_noop', 'esc_html__', 'esc_html_e', 'esc_html_x', 'esc_attr__', 'esc_attr_e', 'esc_attr_x' );
+		$tokens      = token_get_all( (string) file_get_contents( $path ) );
+		$total       = count( $tokens );
+		$domains     = array();
+
+		for ( $index = 0; $index < $total; $index++ ) {
+			$token = $tokens[ $index ];
+
+			if ( ! is_array( $token ) || T_STRING !== $token[0] || ! in_array( $token[1], $translators, true ) ) {
+				continue;
+			}
+
+			$opening = $index + 1;
+
+			while ( $opening < $total && is_array( $tokens[ $opening ] ) && in_array( $tokens[ $opening ][0], array( T_WHITESPACE, T_COMMENT, T_DOC_COMMENT ), true ) ) {
+				$opening++;
+			}
+
+			if ( $opening >= $total || '(' !== $tokens[ $opening ] ) {
+				continue;
+			}
+
+			$depth      = 0;
+			$literals   = array();
+
+			for ( $cursor = $opening; $cursor < $total; $cursor++ ) {
+				$inner = $tokens[ $cursor ];
+
+				if ( '(' === $inner ) {
+					$depth++;
+					continue;
+				}
+
+				if ( ')' === $inner ) {
+					$depth--;
+
+					if ( 0 === $depth ) {
+						break;
+					}
+
+					continue;
+				}
+
+				if ( is_array( $inner ) && T_CONSTANT_ENCAPSED_STRING === $inner[0] && 1 === $depth ) {
+					$literals[] = trim( $inner[1], '\'"' );
+				}
+			}
+
+			if ( array() !== $literals ) {
+				$domains[] = (string) end( $literals );
+			}
+		}
+
+		return array_values( array_unique( $domains ) );
 	}
 
 	/**

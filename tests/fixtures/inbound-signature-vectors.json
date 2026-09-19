@@ -1,0 +1,55 @@
+{
+    "purpose": "Reference vectors for the signature of an INCOMING delivery, the one Inbound\\InboundSignatureVerifier decides on. They exist so that this plugin's verifier is measured against a value produced OUTSIDE it - by the platform that emits - instead of against another implementation written in this same repository. A verifier checked only against this repository's own signer is checked against itself: if both made the same mistake, hexadecimal instead of base64 or hashing a re-encoded body, they would agree and the green would mean nothing.",
+    "algorithm": "base64_encode( hash_hmac( 'sha256', raw_body, secret, true ) ) - the base64 encoding of the BINARY HMAC-SHA256 digest of the body exactly as it arrived. Without the binary flag the digest comes back in hexadecimal and its base64 is a well-formed value that verifies nowhere.",
+    "frozen_upstream_by": {
+        "contract": "backend/docs/architecture/store-order-status-receiver-contract.md, section 3.2 (Esquema y secreto), table 'Vector CONGELADO', in the factuarea monorepo.",
+        "test": "backend/tests/Unit/Integration/Architecture/StoreOrderStatusReceiverContractTest.php, constant FROZEN_SIGNATURE, which asserts the value against the real emitter App\\Integration\\Infrastructure\\Provider\\Adapters\\WooCommerce\\StoreFeedbackSigner::sign().",
+        "how_it_got_here": "COPIED character for character from that contract on 2026-09-18. It was deliberately NOT recomputed in this repository: the point of the vector is to anchor the two ends of the round trip to one shared number, and a number this repository computed for itself anchors nothing.",
+        "regenerating": "Never edit a signature on its own to make a red test pass - that is editing the answer key. If the vector has to move, it moves upstream first, in the contract and its test, and is copied here afterwards."
+    },
+    "do_not_translate": "The body and the secret below are Spanish literals and they stay that way. They are not copy and the secret is not a real credential: they are one half of a shared anchor, copied byte for byte from the upstream contract, and changing a single character of either changes the signature and destroys the anchoring that is the entire reason this file exists.",
+    "vectors": [
+        {
+            "name": "frozen-order-status-body",
+            "kind": "valid",
+            "body": "{\"order_id\":\"1042\",\"status\":\"shipped\"}",
+            "secret": "secreto-de-la-tienda",
+            "presented": "Ssaf9gX6rfbUJulkYwdJbPAns6JntfbvtO2p+X7hDF4=",
+            "expected_verdict": "accepted",
+            "why": "The frozen vector itself. The body is deliberately not a complete status notice: what it pins is the SCHEME, and a vector with fewer fields survives the contract gaining an optional key.",
+            "also_asserted_as": "The expected signature this plugin computes for this body and this secret has to BE this string, not merely verify against it. A verifier that returned true for everything would pass the acceptance case alone."
+        },
+        {
+            "name": "frozen-order-status-body-with-one-byte-altered",
+            "kind": "invalid",
+            "body": "{\"order_id\":\"1043\",\"status\":\"shipped\"}",
+            "secret": "secreto-de-la-tienda",
+            "presented": "Ssaf9gX6rfbUJulkYwdJbPAns6JntfbvtO2p+X7hDF4=",
+            "expected_verdict": "rejected",
+            "alteration": "One byte of the BODY: the order identifier 1042 becomes 1043. The signature presented is the frozen one, unchanged.",
+            "why": "The half that gives the acceptance case its meaning. A digest changes completely with any input bit, so a signature that still verified after this edit could only come from a verifier that is not deriving anything from the body. It is also the shape of the attack that matters here: a delivery whose signature was captured from a real notice and whose body was edited."
+        },
+        {
+            "name": "frozen-order-status-signature-altered-by-one-character",
+            "kind": "invalid",
+            "body": "{\"order_id\":\"1042\",\"status\":\"shipped\"}",
+            "secret": "secreto-de-la-tienda",
+            "presented": "Tsaf9gX6rfbUJulkYwdJbPAns6JntfbvtO2p+X7hDF4=",
+            "expected_verdict": "rejected",
+            "alteration": "First character of the SIGNATURE, S changed to T. The body is the frozen one, unchanged.",
+            "why": "The mirror of the previous vector, from the other side. Together they say that the verdict depends on both operands and on neither alone."
+        },
+        {
+            "name": "outbound-webhook-scheme-hexadecimal-over-timestamp-and-body",
+            "kind": "wrong-scheme",
+            "body": "{\"order_id\":\"1042\",\"status\":\"shipped\"}",
+            "secret": "secreto-de-la-tienda",
+            "timestamp": "1789812000",
+            "timestamp_is": "The instant 2026-09-19T10:00:00+00:00 of the contract's worked example, as a Unix timestamp. The test asserts that correspondence so the vector keeps explaining itself.",
+            "presented_formula": "hash_hmac( 'sha256', timestamp . '.' . body, secret )   -- no fourth argument, so HEXADECIMAL",
+            "presented_is_derived_on_purpose": "This is the one value in this file the test computes instead of reading. It is not an answer key: it is the string that must be REFUSED, and deriving it from the formula of the other lane means the case keeps tracking that lane rather than a number somebody typed once. Recording it would let it drift away from what the platform actually emits without anything noticing.",
+            "expected_verdict": "rejected",
+            "why": "The platform signs a THIRD lane - its outbound webhooks to an endpoint the customer configures - with the very same header name, X-Factuarea-Signature, and a different scheme: hexadecimal over timestamp.'.'.body. Anchors: backend/app/Integration/Infrastructure/Jobs/OutboundWebhookJob.php:166 and backend/app/Integration/Infrastructure/Provider/Adapters/Webhooks/OutboundWebhookService.php:239. The header name says nothing about the scheme; the receiver does. This receiver accepts ONE scheme and rejects the other with the same 401 as any other bad signature, without distinguishing it: telling a prober that it guessed the right lane and the wrong encoding is a hint it did not have."
+        }
+    ]
+}

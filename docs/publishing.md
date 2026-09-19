@@ -18,7 +18,7 @@ here.
 | Submitting the plugin for the first time | A maintainer | Once, ever |
 | Reviewing that submission | The WordPress Plugins team | Once, ever, and it takes as long as it takes |
 | Uploading a release to the directory | A maintainer | Every release |
-| Everything else: gates, version consistency, artefact | Continuous integration | Every release |
+| Everything else: gates, version consistency, revalidating the declared versions, artefact | Continuous integration | Every release |
 
 The consequence is worth stating plainly, because it changes how a mistake is
 handled. **Once a version is in the directory, it cannot be taken back.** It can be
@@ -39,8 +39,11 @@ A checklist, in the order the review notices problems.
 - [ ] **No paywall, no trialware.** The directory refuses a plugin whose functionality is restricted, disabled or unlocked by a payment, a licence key or a plan upgrade. Every feature of this plugin works for everybody who installs it; the commercial boundary is Factuarea, the service. `composer lint:no-paywall` fails on any condition that gates behaviour on a payment.
 - [ ] **The `Contributors` line in `readme.txt` names real WordPress.org accounts.** It reads `factuarea` today. If the account that owns the submission is named differently, correct it before submitting: an unknown username there is a review finding, and it is a slow one to resolve.
 - [ ] **External services are disclosed.** `readme.txt` says what leaves the site, to where, when, and what it contains. This is a review requirement and the plugin sends personal data, so it is checked closely.
-- [ ] **`composer verify` is green.** All of it, including the packaging step.
-- [ ] **The end-to-end suite is green** against the containerised environment: five scenarios, and the report says five rather than zero.
+- [ ] **`composer verify` is green.** All of it, including the packaging step and the version-coherence gate, `composer lint:tested-up-to`.
+- [ ] **The declared versions are coherent and revalidated.** Two separate things, and both have to hold:
+  - `composer lint:tested-up-to` reads the four declarations of `readme.txt` - the minimum and the tested version of WordPress and of WooCommerce - and fails when one is unreadable, when a tested version sits **below** its own required minimum, or when the minimums in the listing, in the plugin header and in `Contract\Constants` disagree. Three places have always carried those numbers and nothing compared them until this gate existed.
+  - Continuous integration then **runs the end-to-end suite against the declared pair**, taking it from that gate's emit mode rather than parsing the listing a second time. A declaration nobody exercises is a promise made to strangers that stops being true in silence, and the directory republishes it as it stands. Raising `Tested up to` without the run now turns the pipeline red instead of resting on the honesty of whoever edited the line.
+- [ ] **The end-to-end suite is green** against the containerised environment: five scenarios, and the report says five rather than zero. That run defends the **floor** - the minimum pair `.wp-env.json` pins - and the run above defends the **ceiling** that is declared. They are two jobs on purpose: merging them would stop testing one of the two.
 - [ ] **The official plugin check tool reports no blocking findings**, run at its **current** version rather than a pinned one. It is not pinned on purpose: a reproducible green can be lying the day the directory tightens a requirement, and finding that out here is better than finding it out in review.
 - [ ] **The artefact contains what it should.** Unzip `dist/factuarea-for-woocommerce.zip` and look: the plugin entry point, `uninstall.php`, `src/`, `LICENSE`, `readme.txt`, `README.md`. No `tests/`, no `scripts/`, no `docs/`, no `vendor/`, no `node_modules/`, no development configuration.
 
@@ -72,7 +75,8 @@ makes WordPress offer an update that installs the same code.
 Also update:
 
 - `== Changelog ==` in `readme.txt`, with the section for this version.
-- `Tested up to` and `WC tested up to`, **only if you actually ran the end-to-end suite against that pair.** Raising either number without running it is the one edit in this file that is forbidden outright: it is a claim, made to strangers, that nobody verified.
+- `Tested up to` and `WC tested up to`, **only if you actually ran the end-to-end suite against that pair.** Raising either number without running it is the one edit in this file that is forbidden outright: it is a claim, made to strangers, that nobody verified. It is no longer only a rule: continuous integration runs the suite against whatever those two lines declare, so an unbacked number fails the pipeline naming the version it could not stand up.
+- Nothing else about the version is automatic. Submitting the plugin the first time, waiting for the review and uploading the release are still done by a person, and the review is done by a person who does not work here. Nothing in this repository shortens that queue or predicts its date; section 1 is the whole of what this side controls.
 
 #### How to run the suite against a WordPress the environment does not pin
 
@@ -81,11 +85,24 @@ is the pair the suite exists to defend. `Tested up to` is a claim about a
 different pair, so measuring it takes four commands and leaves nothing behind:
 
 ```bash
-echo '{ "core": "https://wordpress.org/wordpress-<x.y>.zip" }' > .wp-env.override.json
+eval "$( php scripts/check-tested-up-to.php --emit | sed 's/^/export /' )"   # the declared pair, from the gate
+node tests/e2e/declared-pair.js          # writes .wp-env.override.json: core + the WHOLE plugins array, release resolved inside the series
 npm run e2e:down && npx wp-env destroy && npm run e2e:up
-FACTUAREA_E2E_WORDPRESS=<x.y> npm run e2e
-rm .wp-env.override.json
+npm run e2e                              # the two variables are already exported
+node tests/e2e/declared-pair.js --remove
 ```
+
+The script does by hand what the `e2e-declared` job of `ci.yml` does in CI, and
+it is the only writer of that file on purpose: a second reader of `readme.txt`
+would be a second declaration of the pair.
+
+Two things about that file that the `e2e-declared` job of `ci.yml` also has to
+respect. wp-env replaces the `plugins` array whole, so the override must repeat
+`"."` or the WordPress it starts has no plugin under test. And `WC tested up to`
+names a SERIES (`8.9`), not a release: `woocommerce.8.9.zip` does not exist, so
+the release inside that series has to be resolved (the job reads the newest one
+from the directory index; by hand, pick it from the plugin's changelog) - never
+written as a fourth version declaration that drifts on its own.
 
 The environment guard still refuses anything other than the series named in
 `FACTUAREA_E2E_WORDPRESS`, and the run prints the three versions it found. That

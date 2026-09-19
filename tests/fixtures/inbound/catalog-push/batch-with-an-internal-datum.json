@@ -1,0 +1,16 @@
+{
+    "idempotency_key": "wc-catalog-20260919T101000Z-0003",
+    "items": [
+        {
+            "sku": "SKU-0001",
+            "price": "12.40",
+            "available_quantity": 7
+        },
+        {
+            "sku": "SKU-0002",
+            "price": "31.95",
+            "cost": "18.10",
+            "supplier": "Northern Supplies Ltd"
+        }
+    ]
+}

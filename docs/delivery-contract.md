@@ -29,6 +29,13 @@ The reason the refund has its own capture point is that a **partial** refund doe
 change the order status. A plugin that watched status alone would miss every one of
 them.
 
+**One thing never produces an entry: a refund that Factuarea itself published into
+this shop.** Both capture points read the mark such a refund carries and stand
+down, so the money that came back through the platform does not travel out again
+and produce a second corrective invoice for the same sale. A refund the merchant
+makes in their own shop carries no mark and is delivered exactly as before. See
+[inbound-contract.md](inbound-contract.md), section 6.
+
 ### Event identity
 
 Each entry carries an identity derived from the domain object and from nothing else:
@@ -76,7 +83,9 @@ Two answers of that route are worth knowing before you debug anything:
 
 ## 3. The headers
 
-Exactly seven, the same set and the same names a native WooCommerce delivery sends:
+Seven of them are the same set and the same names a native WooCommerce delivery
+sends. An eighth, this package's own, travels only when the shop has a store
+identifier configured; section 3.1.
 
 | Header | Value |
 | --- | --- |
@@ -102,6 +111,44 @@ set a `User-Agent`.
 A refund travels as the **order** carrying its refunds, which is what a native
 WooCommerce delivery does too. The receiver detects the refund from the refunds it
 finds in that order body.
+
+### 3.1 The eighth header: which shop this is
+
+| Header | Value |
+| --- | --- |
+| `X-Factuarea-Store-Id` | The store identifier configured in **this** installation, exactly as the merchant pasted it from Factuarea. |
+
+**It is additive, and that word is doing work.** The seven above keep their names,
+their values and their positions; this one is appended after them, before the
+content type the transport adds, so the full order on the wire is
+`[the seven native ones][X-Factuarea-Store-Id][Content-Type]`. A receiver that
+knows only the seven keeps accepting the delivery without changing a line, which
+is why the header is not in the list of native ones and is not asserted as one of
+them.
+
+**It travels only when there is something to say.** An installation whose store
+identifier field is empty - or holds nothing but blanks - sends exactly the seven
+of always, which is what every installation sent before this header existed. The
+identifier is **not** a precondition of delivering: a shop that never filled the
+field in has been delivering correctly since it was installed, and refusing to
+deliver until it is filled in would silence that shop's invoicing on the day it
+updated the plugin.
+
+**Why the identifier and not the origin address.** The address already travels, in
+`X-WC-Webhook-Source`, and it does not tell two shops registered under the **same
+Factuarea connection** apart: they share a signing secret, and the source header
+is whatever each site calls itself. The identifier is the value the merchant
+pasted from Factuarea, so it is exactly the key an identity extractor on the other
+side would need. Guessing which of two shops sent a sale is guessing which company
+it invoices against.
+
+It is read from the settings once per drain and carried by every delivery of that
+pass, not just the first. It is declared from the configuration of this
+installation and never derived from the contents of the order.
+
+**The signature does not change.** It covers the body and only the body, so the
+same order signs to the same value with the header and without it. A delivery that
+suddenly fails to verify is not this header's doing.
 
 ## 4. The body
 
@@ -137,9 +184,15 @@ in constant time against the raw request body it captured before touching anythi
 else.
 
 The signing secret is per WooCommerce connection in Factuarea, not per store, and it
-is a **write** credential: it signs outgoing deliveries and verifies the incoming
-correlation callback. It never authenticates a read. The API key is a **read**
-credential: the connection test and the invoice PDF. It never signs.
+is a **write** credential: it signs the deliveries that leave, and it verifies every
+delivery that arrives - the correlation callback and the inbound receivers alike.
+It never authenticates a read. The API key is a **read** credential: the connection
+test and the invoice PDF. It never signs.
+
+The incoming direction uses a **different header name** and the same scheme; the
+one that is easy to get wrong is the platform's outbound-webhook lane, which shares
+the incoming header name and uses another scheme entirely. All three are set out in
+[inbound-contract.md](inbound-contract.md), section 3.2.
 
 An empty secret does not produce a delivery. Signing raises a typed error, the entry
 is settled with that reason, and it is not retried. Sending unsigned would come back

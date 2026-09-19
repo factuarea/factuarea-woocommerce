@@ -1,0 +1,26 @@
+=== Factuarea for WooCommerce ===
+Contributors: factuarea
+Tags: woocommerce, invoicing, invoices, spain, verifactu
+Requires at least: 6.5
+Tested up to: 6.4
+Requires PHP: 8.1
+Stable tag: 0.1.0
+License: GPLv2 or later
+License URI: https://www.gnu.org/licenses/gpl-2.0.html
+WC requires at least: 8.9
+WC tested up to: 8.9
+
+An internally impossible listing: it demands a WordPress the package says it
+never ran against.
+
+== Description ==
+
+This is the mistake a raised minimum leaves behind. Somebody moves "Requires at
+least" up because an older WordPress no longer works, and forgets that "Tested
+up to" is a separate line; the listing then promises support for a range whose
+floor is above its ceiling. The directory publishes it unchanged, and every
+reader of the page is being told two things that cannot both be true.
+
+Only the WordPress pair is broken here. The WooCommerce pair and the two
+minimums agree with the plugin header and Constants, so a report naming anything
+else would be the gate finding what is not there.

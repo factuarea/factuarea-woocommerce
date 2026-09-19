@@ -1,0 +1,24 @@
+=== Factuarea for WooCommerce ===
+Contributors: factuarea
+Tags: woocommerce, invoicing, invoices, spain, verifactu
+Requires at least: 6.5
+Tested up to: 7.2
+Requires PHP: 8.1
+Stable tag: 0.1.0
+License: GPLv2 or later
+License URI: https://www.gnu.org/licenses/gpl-2.0.html
+WC requires at least: 8.9
+WC tested up to: 9.1
+
+A listing that tells the directory one WooCommerce and the shop another.
+
+== Description ==
+
+"WC tested up to" is written twice: here, where the public directory reads it,
+and in the plugin header, where WooCommerce reads it to decide whether to warn
+the merchant that the plugin has not been tested with the version they are
+running. Raising it in one place alone gives the two readers two different
+answers to the same question, and neither of them can see the other.
+
+Everything else in this listing is coherent, so the report has to name these two
+values and only these.

@@ -1,0 +1,23 @@
+=== Factuarea for WooCommerce ===
+Contributors: factuarea
+Tags: woocommerce, invoicing, invoices, spain, verifactu
+Requires at least: 6.5
+Tested up to: 7.2
+Requires PHP: 8.1
+Stable tag: 0.1.0
+License: GPLv2 or later
+License URI: https://www.gnu.org/licenses/gpl-2.0.html
+WC requires at least: 8.9
+WC tested up to: latest
+
+A listing with one declaration that is not a version at all.
+
+== Description ==
+
+"latest" reads like an answer and is not one. It names no release, so nothing can
+be started against it, nothing can be compared with the required minimum, and the
+claim the directory prints on the plugin page means whatever its reader assumes.
+
+A gate that skipped what it could not parse would call this listing clean, which
+is the failure this fixture exists to catch: an unreadable declaration has to be
+reported with the line it is on, exactly like a wrong one.

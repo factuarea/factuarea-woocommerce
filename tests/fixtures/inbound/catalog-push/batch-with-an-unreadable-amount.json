@@ -1,0 +1,13 @@
+{
+    "idempotency_key": "wc-catalog-20260919T101500Z-0004",
+    "items": [
+        {
+            "sku": "SKU-0001",
+            "price": "12.40"
+        },
+        {
+            "sku": "SKU-0002",
+            "price": "twelve euros forty"
+        }
+    ]
+}

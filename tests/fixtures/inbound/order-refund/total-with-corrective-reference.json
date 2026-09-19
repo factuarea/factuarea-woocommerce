@@ -1,0 +1,8 @@
+{
+    "order_id": "1042",
+    "amount": "84.97",
+    "currency": "EUR",
+    "scope": "total",
+    "corrective_invoice_reference": "R-2026-0008",
+    "idempotency_key": "wc-refund-019e0000-0000-7000-8000-000000000043"
+}
