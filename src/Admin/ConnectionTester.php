@@ -118,6 +118,40 @@ class ConnectionTester {
 	public const DIAGNOSTIC_STORE_NOT_IN_ACCOUNT = 'store_not_in_account';
 
 	/**
+	 * The receiver accepted the API key and the configured COMPANY is not one
+	 * the key can reach.
+	 *
+	 * It is told apart from the store above, and the separation is the whole
+	 * reason this diagnostic exists. Both come back as a 404 carrying one of
+	 * the receiver's error documents, and both are "something in your settings
+	 * names a thing this key cannot see" - but the merchant fixes them in
+	 * different fields, and a message naming the store identifier sends
+	 * somebody whose company identifier is wrong to re-copy a value that was
+	 * already right.
+	 *
+	 * What separates them is the stable code of the error document, not the
+	 * status: the company segment is resolved before the route runs, so its
+	 * refusal carries the code of a profile that was not found and names
+	 * `company` as the offending parameter.
+	 */
+	public const DIAGNOSTIC_COMPANY_NOT_IN_ACCOUNT = 'company_not_in_account';
+
+	/**
+	 * The receiver reached the configured company and it is not active.
+	 *
+	 * Told apart from a key without the permission, and the separation is the
+	 * whole reason this diagnostic exists. Both come back as a 403, but nothing
+	 * in the API key is wrong here: the company segment resolved, and the
+	 * company behind it is deactivated. A message about permissions sends the
+	 * merchant to review the scopes of a key that was already right, while the
+	 * fix is in Factuarea and on the company.
+	 *
+	 * What separates them is the stable code of the error document, which the
+	 * receiver emits when it resolves the company segment of the address.
+	 */
+	public const DIAGNOSTIC_COMPANY_INACTIVE = 'company_inactive';
+
+	/**
 	 * Nothing answered: no route to the host, a dropped connection, a timeout, a
 	 * certificate that did not verify.
 	 */
@@ -144,6 +178,8 @@ class ConnectionTester {
 		self::DIAGNOSTIC_INVALID_CREDENTIAL,
 		self::DIAGNOSTIC_INSUFFICIENT_PERMISSION,
 		self::DIAGNOSTIC_STORE_NOT_IN_ACCOUNT,
+		self::DIAGNOSTIC_COMPANY_NOT_IN_ACCOUNT,
+		self::DIAGNOSTIC_COMPANY_INACTIVE,
 		self::DIAGNOSTIC_ADDRESS_UNREACHABLE,
 		self::DIAGNOSTIC_UNEXPECTED_RESPONSE,
 	);
@@ -162,6 +198,37 @@ class ConnectionTester {
 	 * merchant is a permission name and never a sentence, a link or a secret.
 	 */
 	private const SCOPE_PATTERN = '/\b([a-z][a-z0-9_]*:[a-z][a-z0-9_]*)\b/';
+
+	/**
+	 * Stable code the receiver answers with when the company segment of the
+	 * path names a company the credential cannot reach.
+	 *
+	 * MEASURED against the middleware that resolves the segment rather than
+	 * guessed from the wording: a company that does not exist, one that belongs
+	 * to another account and one that belongs to the other environment all
+	 * collapse into this single code, on purpose, so that the answer is not an
+	 * oracle telling a stranger which tax identifiers are registered. That
+	 * collapse is exactly why this class cannot tell the three apart either,
+	 * and it does not try: all three are the same thing to fix.
+	 */
+	private const COMPANY_REFUSED_CODE = 'profile_not_found';
+
+	/**
+	 * Name the receiver uses for the offending parameter when the refusal is
+	 * about the company segment.
+	 *
+	 * Read as a SECOND signal beside the code above, and not instead of it: a
+	 * code is a contract and a parameter name is a convenience, so either one
+	 * recognising the answer is enough, and neither being present leaves the
+	 * store diagnostic as it was.
+	 */
+	private const COMPANY_ERROR_PARAM = 'company';
+
+	/**
+	 * Stable code the receiver emits when the company segment of the address
+	 * names a company that is deactivated.
+	 */
+	private const COMPANY_INACTIVE_CODE = 'company_inactive';
 
 	/**
 	 * The transport. Every request of this plugin goes through it.
@@ -255,6 +322,14 @@ class ConnectionTester {
 		}
 
 		if ( 403 === $status ) {
+			if ( $this->is_receiver_error_document( $response ) && $this->names_an_inactive_company( $response ) ) {
+				return $this->result(
+					self::DIAGNOSTIC_COMPANY_INACTIVE,
+					__( 'The API key is valid, and the configured company is not active in Factuarea.', 'factuarea-for-woocommerce' ),
+					__( 'Reactivate the company in Factuarea, or point the company identifier field at an active one, and run the test again. Nothing is wrong with the API key: the company behind the identifier is deactivated, and a deactivated company answers nothing.', 'factuarea-for-woocommerce' )
+				);
+			}
+
 			return $this->result(
 				self::DIAGNOSTIC_INSUFFICIENT_PERMISSION,
 				__( 'The API key is valid, and it is not allowed to read stores.', 'factuarea-for-woocommerce' ),
@@ -263,6 +338,14 @@ class ConnectionTester {
 		}
 
 		if ( 404 === $status && $this->is_receiver_error_document( $response ) ) {
+			if ( $this->names_the_company_segment( $response ) ) {
+				return $this->result(
+					self::DIAGNOSTIC_COMPANY_NOT_IN_ACCOUNT,
+					__( 'The API key is valid, and it cannot reach the configured company.', 'factuarea-for-woocommerce' ),
+					__( 'Open the company in Factuarea, copy its identifier again into the company identifier field, and check that the API key was created for that company. A key issued for one company never reads another, however right the store identifier is.', 'factuarea-for-woocommerce' )
+				);
+			}
+
 			return $this->result(
 				self::DIAGNOSTIC_STORE_NOT_IN_ACCOUNT,
 				__( 'The API key is valid, and the configured store does not belong to its account.', 'factuarea-for-woocommerce' ),
@@ -379,21 +462,35 @@ class ConnectionTester {
 			$missing[] = __( 'the store identifier', 'factuarea-for-woocommerce' );
 		}
 
+		if ( '' === $this->company_id() ) {
+			$missing[] = __( 'the company identifier', 'factuarea-for-woocommerce' );
+		}
+
 		return $missing;
 	}
 
 	/**
 	 * Address of the store query.
 	 *
-	 * The identifier is percent-encoded even though a well-formed one has
-	 * nothing to encode: it is a value the merchant pasted, and a stray space or
-	 * slash in it would otherwise build a different path and be reported as a
-	 * missing store.
+	 * Both identifiers are percent-encoded even though a well-formed one has
+	 * nothing to encode: they are values the merchant pasted, and a stray space
+	 * or slash in either would otherwise build a different path and be reported
+	 * as a missing store.
+	 *
+	 * IT IS ONLY EVER CALLED WITH BOTH OF THEM STORED. `test()` returns the
+	 * not-configured diagnostic before reaching here when either is empty, and
+	 * that ordering is the guard rather than a courtesy: a path built with an
+	 * empty company segment would collapse to the flat form this route no
+	 * longer serves, and the merchant would be told their store does not exist.
 	 *
 	 * @return string Absolute address of the configured store.
 	 */
 	private function store_url(): string {
-		return $this->api_base_url() . sprintf( Constants::STORE_QUERY_PATH, rawurlencode( $this->store_id() ) );
+		return $this->api_base_url() . sprintf(
+			Constants::STORE_QUERY_PATH,
+			rawurlencode( $this->company_id() ),
+			rawurlencode( $this->store_id() )
+		);
 	}
 
 	/**
@@ -424,6 +521,20 @@ class ConnectionTester {
 	}
 
 	/**
+	 * The stored company identifier.
+	 *
+	 * Read through the settings screen's accessor rather than from the option
+	 * directly, so that there is ONE answer to "which company is configured"
+	 * and the connection test cannot end up testing a different one from the
+	 * one the invoice download uses.
+	 *
+	 * @return string The identifier, or an empty string when none is stored.
+	 */
+	private function company_id(): string {
+		return SettingsPage::company_id();
+	}
+
+	/**
 	 * Is this answer one of the receiver's own error documents?
 	 *
 	 * The receiver answers every error with a document carrying an `error`
@@ -443,6 +554,55 @@ class ConnectionTester {
 		}
 
 		return isset( $document['error']['code'] ) && is_string( $document['error']['code'] ) && '' !== $document['error']['code'];
+	}
+
+	/**
+	 * Does this refusal name the company segment rather than the store?
+	 *
+	 * Asked only of an answer already recognised as one of the receiver's own
+	 * error documents, so what is read here is a field of a document this
+	 * plugin knows the shape of.
+	 *
+	 * @param HttpResponse $response What came back.
+	 * @return bool
+	 */
+	private function names_the_company_segment( HttpResponse $response ): bool {
+		$document = $response->decoded_body();
+
+		if ( null === $document || ! isset( $document['error'] ) || ! is_array( $document['error'] ) ) {
+			return false;
+		}
+
+		$error = $document['error'];
+
+		if ( isset( $error['code'] ) && is_string( $error['code'] ) && self::COMPANY_REFUSED_CODE === $error['code'] ) {
+			return true;
+		}
+
+		return isset( $error['param'] ) && is_string( $error['param'] ) && self::COMPANY_ERROR_PARAM === $error['param'];
+	}
+
+	/**
+	 * Does this refusal say the company is deactivated?
+	 *
+	 * Asked only of an answer already recognised as one of the receiver's own
+	 * error documents. Only the stable code is read: the message is written in
+	 * the language of the account, and the parameter is `company` for a company
+	 * that cannot be reached too, so neither of those two tells the difference.
+	 *
+	 * @param HttpResponse $response What came back.
+	 * @return bool
+	 */
+	private function names_an_inactive_company( HttpResponse $response ): bool {
+		$document = $response->decoded_body();
+
+		if ( null === $document || ! isset( $document['error'] ) || ! is_array( $document['error'] ) ) {
+			return false;
+		}
+
+		$code = $document['error']['code'] ?? null;
+
+		return is_string( $code ) && self::COMPANY_INACTIVE_CODE === $code;
 	}
 
 	/**

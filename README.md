@@ -49,7 +49,7 @@ the configuration below and switch delivery on.
 
 ## Configuration
 
-Five values connect this shop to Factuarea, and one of them travels in the other
+Six values connect this shop to Factuarea, and one of them travels in the other
 direction. Do the steps in this order: the last one only tells you the truth once
 the first four are saved.
 
@@ -67,6 +67,19 @@ defaults, and automatic invoicing is off until you turn it on.
 Copy the store identifier that Factuarea gives you back. It is a UUID, and it is the
 value step 2 asks for.
 
+Copy the **company identifier** too, from the company this shop invoices for. It is
+a UUID as well, and it is a different one: the store is this shop, the company is who
+issues the invoices. Every read this plugin makes carries the company in its address
+— `https://api.factuarea.com/v1/companies/{company}/stores/{store}` for the
+connection test, `…/v1/companies/{company}/invoices/{invoice}/pdf` for an invoice
+download — so the plugin cannot do anything until it has one.
+
+You paste the identifier rather than your tax ID, and that is deliberate rather than
+an omission. Translating a tax ID into the identifier is an operation on the
+**account**, and it needs a permission over every company of the account; a shop's
+read key does not have it and should not be given it in order to build a store
+address. One field costs less than that permission.
+
 ### 2. Fill in the connection settings in WordPress
 
 Go to **WooCommerce > Factuarea**:
@@ -76,7 +89,8 @@ Go to **WooCommerce > Factuarea**:
 | Factuarea address | The base address of your Factuarea installation. |
 | Factuarea API address | The base address of the Factuarea public API (`https://api.factuarea.com` by default). Deliveries go to the Factuarea address above; the connection test and the invoice PDF are read from this one, because the API is served on its own domain. Change it only if Factuarea told you to. |
 | API key | A Factuarea API key. This plugin uses it only to **read**: the connection test and the invoice PDF. It never signs anything with it. |
-| Store identifier | The UUID from step 1. |
+| Store identifier | The store UUID from step 1. |
+| Company identifier | The company UUID from step 1 — the company this shop invoices for, not the store. Leave it empty and the connection test, and every invoice download, report an incomplete configuration instead of guessing a company. |
 | Delivery | Leave it off for now. Switch it on in step 5. |
 
 Save.
@@ -106,11 +120,18 @@ against it could not tell "configured correctly" from "nobody here knows you".
 
 The result names which of the settings is wrong, rather than failing plainly:
 
+* a setting the test needs is still empty, and it names which;
 * the API key is not valid;
 * the API key is valid but lacks the permission to read stores;
-* the store identifier does not belong to this account;
+* the API key is valid and cannot reach the configured **company**;
+* the **store** identifier does not belong to this account;
 * the Factuarea address does not answer;
 * something unexpected came back.
+
+The company and the store are two separate results on purpose. Both come back from
+Factuarea as the same kind of refusal, and they are fixed in two different fields: a
+message naming the store would send somebody whose company identifier is wrong to
+re-copy a store identifier that was already right.
 
 No part of the API key or of the signing secret appears in any of those messages.
 
@@ -163,11 +184,12 @@ whole or truncated. Every option this plugin registers is kept out of the WordPr
 REST settings endpoint, so a settings export does not carry them off the site.
 
 **What uninstalling deletes.** The stored credentials and settings: the Factuarea
-address, the API key, the store identifier, the signing secret, the delivery switch,
-the flag recording that the secret was already shown, and the marker holding the
-outbox table's schema version. They are deleted by name, one by one, from an
-enumerated list rather than by matching a prefix: a prefix match would delete whatever
-anything else happened to name that way, without anybody having decided to.
+address, the API key, the store identifier, the company identifier, the signing
+secret, the delivery switch, the flag recording that the secret was already shown,
+and the marker holding the outbox table's schema version. They are deleted by name,
+one by one, from an enumerated list rather than by matching a prefix: a prefix match
+would delete whatever anything else happened to name that way, without anybody
+having decided to.
 
 **What uninstalling does not delete, on purpose.**
 

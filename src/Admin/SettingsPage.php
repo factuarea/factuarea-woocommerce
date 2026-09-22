@@ -177,6 +177,18 @@ final class SettingsPage {
 	public const DEBUG_INFORMATION_SECTION = 'factuarea-for-woocommerce';
 
 	/**
+	 * Shape a company identifier has to have to be stored.
+	 *
+	 * A shape and not a list, and a generic UUID rather than one version of
+	 * one: the sanitiser only has to separate "this could be an identifier"
+	 * from "this is a tax identifier, a company name or a pasted URL", and
+	 * anything narrower would be this package deciding on Factuarea's behalf
+	 * which identifiers it is allowed to issue in the future - a decision a
+	 * DISTRIBUTED plugin cannot take back from the shops that installed it.
+	 */
+	private const COMPANY_ID_PATTERN = '/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i';
+
+	/**
 	 * Reads the outbox. Built on first use so that nothing touches the database
 	 * on a request that never renders the notice.
 	 *
@@ -311,6 +323,16 @@ final class SettingsPage {
 		);
 		register_setting(
 			self::OPTION_GROUP,
+			Constants::OPTION_COMPANY_ID,
+			array(
+				'type'              => 'string',
+				'sanitize_callback' => array( $this, 'sanitize_company_id' ),
+				'show_in_rest'      => false,
+				'default'           => '',
+			)
+		);
+		register_setting(
+			self::OPTION_GROUP,
 			Constants::OPTION_SIGNING_SECRET,
 			array(
 				'type'              => 'string',
@@ -362,6 +384,13 @@ final class SettingsPage {
 			Constants::OPTION_STORE_ID,
 			__( 'Store identifier', 'factuarea-for-woocommerce' ),
 			array( $this, 'render_store_id_field' ),
+			self::MENU_SLUG,
+			self::SETTINGS_SECTION
+		);
+		add_settings_field(
+			Constants::OPTION_COMPANY_ID,
+			__( 'Company identifier', 'factuarea-for-woocommerce' ),
+			array( $this, 'render_company_id_field' ),
 			self::MENU_SLUG,
 			self::SETTINGS_SECTION
 		);
@@ -578,6 +607,45 @@ final class SettingsPage {
 	}
 
 	/**
+	 * Company identifier field.
+	 *
+	 * It is a SECOND identifier and not a second name for the one above. The
+	 * store identifier says which shop this is; this one says which company in
+	 * Factuarea the shop invoices for, and every read this plugin makes now
+	 * carries it. Pasting one where the other belongs produces a read that is
+	 * refused rather than a wrong invoice, which is why both fields are on the
+	 * screen with a description each instead of one field that tries to guess.
+	 *
+	 * There is deliberately no lookup by tax identifier behind this field. See
+	 * `Constants::OPTION_COMPANY_ID` for the measurement: that lookup hangs off
+	 * the account axis and needs a permission a shop credential does not have.
+	 *
+	 * @return void
+	 */
+	public function render_company_id_field(): void {
+		$value = (string) get_option( Constants::OPTION_COMPANY_ID, '' );
+		?>
+		<input
+			type="text"
+			class="regular-text code"
+			id="<?php echo esc_attr( Constants::OPTION_COMPANY_ID ); ?>"
+			name="<?php echo esc_attr( Constants::OPTION_COMPANY_ID ); ?>"
+			value="<?php echo esc_attr( $value ); ?>"
+			spellcheck="false"
+			autocomplete="off"
+		/>
+		<p class="description">
+			<?php
+			echo esc_html__(
+				'Identifier of the company this shop invoices for, as Factuarea shows it. It is a UUID, and it is not the store identifier above: the store is this shop, the company is who issues the invoices. Leave it empty and the connection test, and the invoice downloads, report an incomplete configuration instead of guessing a company.',
+				'factuarea-for-woocommerce'
+			);
+			?>
+		</p>
+		<?php
+	}
+
+	/**
 	 * Delivery switch.
 	 *
 	 * The hidden input before the checkbox is not decoration: a checkbox that is
@@ -695,6 +763,43 @@ final class SettingsPage {
 		}
 
 		return trim( sanitize_text_field( (string) $value ) );
+	}
+
+	/**
+	 * Sanitiser of the company identifier.
+	 *
+	 * It accepts a UUID or nothing, and turns anything else into nothing. The
+	 * shape is checked HERE, on the way in, rather than at the point the URL is
+	 * built: a value that is not an identifier can only ever produce a refused
+	 * read, and a merchant who pasted their tax identifier into this field
+	 * deserves to see the field go empty on save instead of collecting a 404 on
+	 * every invoice download for a week.
+	 *
+	 * Refusing to store it is also what keeps the prohibition of
+	 * `Constants::OPTION_COMPANY_ID` honest: an unusable value stored as if it
+	 * were usable would be read as a configured company and built into a path.
+	 *
+	 * The shape is the generic UUID one and no version is required: which
+	 * version Factuarea issues is its decision to change, and a plugin that is
+	 * DISTRIBUTED cannot correct a narrower rule for every shop that installed
+	 * it.
+	 *
+	 * @param mixed $value Submitted value.
+	 * @return string The identifier, or an empty string when what arrived was
+	 *                not one.
+	 */
+	public function sanitize_company_id( $value ): string {
+		if ( ! is_scalar( $value ) ) {
+			return '';
+		}
+
+		$submitted = trim( sanitize_text_field( (string) $value ) );
+
+		if ( '' === $submitted ) {
+			return '';
+		}
+
+		return 1 === preg_match( self::COMPANY_ID_PATTERN, $submitted ) ? strtolower( $submitted ) : '';
 	}
 
 	/**
@@ -974,6 +1079,11 @@ final class SettingsPage {
 					'value' => (string) get_option( Constants::OPTION_STORE_ID, '' ),
 					'debug' => (string) get_option( Constants::OPTION_STORE_ID, '' ),
 				),
+				'company_id'       => array(
+					'label' => __( 'Company identifier', 'factuarea-for-woocommerce' ),
+					'value' => self::company_id(),
+					'debug' => self::company_id(),
+				),
 				'delivery_enabled' => array(
 					'label' => __( 'Delivery', 'factuarea-for-woocommerce' ),
 					'value' => '1' === (string) get_option( Constants::OPTION_DELIVERY_ENABLED, '0' )
@@ -1028,6 +1138,27 @@ final class SettingsPage {
 		$stored = rtrim( trim( (string) get_option( Constants::OPTION_API_BASE_URL, '' ) ), '/' );
 
 		return '' === $stored ? Constants::DEFAULT_API_BASE_URL : $stored;
+	}
+
+	/**
+	 * The configured company identifier, or an empty string when there is none.
+	 *
+	 * There is NO default and there is no fallback, and that is the whole point
+	 * of resolving it in one method next to the address above. Every other
+	 * setting of this screen either has a sensible default or fails loudly when
+	 * it is wrong; this one would fail QUIETLY, because a read made without the
+	 * company segment used to be a valid request against the company the
+	 * credential belongs to. Answering an empty string here is what lets every
+	 * caller refuse to build a path rather than build a plausible wrong one.
+	 *
+	 * Static for the same reason `api_base_url()` is: its readers are the
+	 * connection test and the invoice download, neither of which is a settings
+	 * screen.
+	 *
+	 * @return string The identifier, or an empty string when none is stored.
+	 */
+	public static function company_id(): string {
+		return trim( (string) get_option( Constants::OPTION_COMPANY_ID, '' ) );
 	}
 
 	/**

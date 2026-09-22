@@ -183,14 +183,29 @@ final class Constants {
 	 * API key, and it is deliberately not the ingestion route: that one answers
 	 * 200 whether the store is known or not, so a probe against it cannot tell
 	 * "configured correctly" from "nobody here knows you".
+	 *
+	 * TWO placeholders, and the ORDER is the contract: the company first, the
+	 * store second. Every resource of the public v1 that belongs to a company
+	 * now hangs off a company segment, and the store is one of them; the flat
+	 * form this constant used to hold - `/v1/stores/%s` - no longer exists and
+	 * answers 404. See OPTION_COMPANY_ID for where the company identifier comes
+	 * from and for why the plugin stores it instead of resolving it.
+	 *
+	 * It stays a TEMPLATE. A constant that already carried a company in it
+	 * would be a per-installation value frozen into a released version.
 	 */
-	public const STORE_QUERY_PATH = '/v1/stores/%s';
+	public const STORE_QUERY_PATH = '/v1/companies/%s/stores/%s';
 
 	/**
 	 * Path of the invoice PDF download, consumed with the API key on the
 	 * merchant's behalf and never exposed to the buyer's browser.
+	 *
+	 * TWO placeholders, company first and invoice second, for the same reason
+	 * as STORE_QUERY_PATH above; the `/pdf` suffix is unchanged, and it is what
+	 * separates this route from the neighbouring `…/pdf-link`, which answers
+	 * with a document carrying a link instead of with the bytes.
 	 */
-	public const INVOICE_PDF_PATH = '/v1/invoices/%s/pdf';
+	public const INVOICE_PDF_PATH = '/v1/companies/%s/invoices/%s/pdf';
 
 	/**
 	 * Delivery header carrying the address of the store the event came from.
@@ -326,6 +341,32 @@ final class Constants {
 	public const OPTION_STORE_ID = 'factuarea_wc_store_id';
 
 	/**
+	 * Option holding the identifier of the COMPANY the v1 reads are made
+	 * against. It is the segment every company-scoped route of the public v1
+	 * now carries, and it is NOT the store identifier above.
+	 *
+	 * WHY THE MERCHANT PASTES AN IDENTIFIER INSTEAD OF A TAX ID
+	 *
+	 * MEASURED, not preferred. A lookup by tax identifier does exist, and it is
+	 * `GET /v1/accounts/{account}/companies?tax_id=…`: a filter of the company
+	 * LISTING, which hangs off the ACCOUNT axis and needs both an account
+	 * identifier and permission to read companies. A shop's read credential has
+	 * neither, so resolving the tax identifier from here would mean asking the
+	 * merchant for an accountancy-wide permission in order to build a store
+	 * URL. Storing the identifier the segment actually wants costs one field.
+	 *
+	 * WHAT MUST NEVER HAPPEN WHEN IT IS EMPTY
+	 *
+	 * An empty value is an incomplete configuration, and it is reported as one.
+	 * It is NEVER resolved, silently or otherwise, to whichever company the
+	 * credential happens to belong to: that would issue against the wrong tax
+	 * identifier and answer 200 while doing it, which is the one failure the
+	 * whole company segment exists to make impossible. No route is built
+	 * without it.
+	 */
+	public const OPTION_COMPANY_ID = 'factuarea_wc_company_id';
+
+	/**
 	 * Option holding the signing secret. WRITE credential: it signs outgoing
 	 * deliveries and verifies the incoming correlation callback. It never
 	 * authenticates a read.
@@ -368,6 +409,7 @@ final class Constants {
 		self::OPTION_API_BASE_URL,
 		self::OPTION_API_KEY,
 		self::OPTION_STORE_ID,
+		self::OPTION_COMPANY_ID,
 		self::OPTION_SIGNING_SECRET,
 		self::OPTION_DELIVERY_ENABLED,
 		self::OPTION_SECRET_REVEALED,

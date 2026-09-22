@@ -128,6 +128,7 @@ final class SettingsPageTest extends TestCase {
 			Constants::OPTION_API_BASE_URL     => 'https://api.factuarea.example',
 			Constants::OPTION_API_KEY          => self::STORED_API_KEY,
 			Constants::OPTION_STORE_ID         => 'store-0001',
+			Constants::OPTION_COMPANY_ID       => '0192f4c3-1111-7a1e-9b6d-2c4f8a0b1d3e',
 			Constants::OPTION_SIGNING_SECRET   => self::STORED_SECRET,
 			Constants::OPTION_DELIVERY_ENABLED => '1',
 			Constants::OPTION_SECRET_REVEALED  => SettingsPage::SECRET_REVEALED,
@@ -226,11 +227,11 @@ final class SettingsPageTest extends TestCase {
 	}
 
 	/**
-	 * The six options are registered, in one group, each with a sanitiser.
+	 * The seven options are registered, in one group, each with a sanitiser.
 	 *
 	 * @return void
 	 */
-	public function test_the_six_settings_are_registered_with_a_sanitiser_each(): void {
+	public function test_the_seven_settings_are_registered_with_a_sanitiser_each(): void {
 		( new SettingsPage() )->register_settings();
 
 		$expected = array(
@@ -238,6 +239,7 @@ final class SettingsPageTest extends TestCase {
 			Constants::OPTION_API_BASE_URL,
 			Constants::OPTION_API_KEY,
 			Constants::OPTION_STORE_ID,
+			Constants::OPTION_COMPANY_ID,
 			Constants::OPTION_SIGNING_SECRET,
 			Constants::OPTION_DELIVERY_ENABLED,
 		);
@@ -245,7 +247,7 @@ final class SettingsPageTest extends TestCase {
 		$this->assertSame(
 			$expected,
 			array_keys( $this->registered_settings ),
-			'The screen has to register exactly the six options the plugin stores on this screen, and no others: WordPress saves every option registered against a submitted page, so an option registered here that nothing renders is an option that gets overwritten on every save.'
+			'The screen has to register exactly the seven options the plugin stores on this screen, and no others: WordPress saves every option registered against a submitted page, so an option registered here that nothing renders is an option that gets overwritten on every save.'
 		);
 
 		foreach ( $expected as $option ) {
@@ -295,10 +297,17 @@ final class SettingsPageTest extends TestCase {
 	}
 
 	/**
-	 * The section and the five visible fields are registered on the screen.
+	 * The section and the six visible fields are registered on the screen.
 	 *
 	 * The signing secret is deliberately NOT among them: it has no input,
 	 * because the only thing that sets it is the generation action.
+	 *
+	 * The store identifier and the company identifier are two fields and not
+	 * one, and the separation is the point: the store says which shop this is,
+	 * the company says who issues the invoices, and every company-scoped read
+	 * of the v1 carries the second one in its path. One field holding whichever
+	 * the merchant happened to paste would build a path that is refused, and
+	 * the refusal would name the wrong setting.
 	 *
 	 * The two addresses both have one, and that is the point of the second: the
 	 * v1 is served from a different host than the one deliveries are posted to,
@@ -307,7 +316,7 @@ final class SettingsPageTest extends TestCase {
 	 *
 	 * @return void
 	 */
-	public function test_the_five_visible_fields_are_registered_on_the_screen(): void {
+	public function test_the_six_visible_fields_are_registered_on_the_screen(): void {
 		( new SettingsPage() )->register_settings();
 
 		$this->assertSame(
@@ -316,10 +325,11 @@ final class SettingsPageTest extends TestCase {
 				Constants::OPTION_API_BASE_URL,
 				Constants::OPTION_API_KEY,
 				Constants::OPTION_STORE_ID,
+				Constants::OPTION_COMPANY_ID,
 				Constants::OPTION_DELIVERY_ENABLED,
 			),
 			array_keys( $this->registered_fields ),
-			'The screen renders five inputs. The signing secret is not one of them: it is generated, shown once and never edited by hand.'
+			'The screen renders six inputs. The signing secret is not one of them: it is generated, shown once and never edited by hand.'
 		);
 
 		foreach ( $this->registered_fields as $field => $registration ) {
@@ -877,6 +887,74 @@ final class SettingsPageTest extends TestCase {
 		);
 		$this->assertSame( self::STORED_API_KEY, $page->sanitize_api_key( null ) );
 		$this->assertSame( 'fk_live_NEWKEY', $page->sanitize_api_key( ' fk_live_NEWKEY ' ) );
+	}
+
+	/**
+	 * The company identifier is stored when it is one, and refused when it is
+	 * not.
+	 *
+	 * The refusal is the half that matters. A value that is not an identifier
+	 * can only ever build a path the receiver does not serve, and the likeliest
+	 * wrong value is the one the merchant already knows by heart: the tax
+	 * identifier of their own company. Storing it would turn every invoice
+	 * download into a refusal the buyer sees and the merchant cannot explain;
+	 * emptying the field on save says what happened where the merchant is
+	 * looking.
+	 *
+	 * @return void
+	 */
+	public function test_the_company_identifier_is_stored_only_when_it_is_an_identifier(): void {
+		$page = new SettingsPage();
+
+		$this->assertSame(
+			'0192f4c3-1111-7a1e-9b6d-2c4f8a0b1d3e',
+			$page->sanitize_company_id( '  0192F4C3-1111-7A1E-9B6D-2C4F8A0B1D3E  ' ),
+			'A pasted identifier arrives with the whitespace of whatever it was copied out of, and Factuarea shows it in either case. Both are the same company, so both are stored the same way.'
+		);
+		$this->assertSame( '', $page->sanitize_company_id( '' ) );
+		$this->assertSame( '', $page->sanitize_company_id( null ) );
+		$this->assertSame(
+			'',
+			$page->sanitize_company_id( 'B12345678' ),
+			'A tax identifier is the value a merchant is most likely to type into a field asking for their company, and it is not what the path segment wants. It is refused here rather than stored and refused on every read.'
+		);
+		$this->assertSame(
+			'',
+			$page->sanitize_company_id( 'https://app.factuarea.example/companies/0192f4c3-1111-7a1e-9b6d-2c4f8a0b1d3e' ),
+			'A whole address pasted out of the browser is not an identifier either, and accepting it would build a path with a second address inside it.'
+		);
+	}
+
+	/**
+	 * The company the reads are made against has no default and no fallback.
+	 *
+	 * Every other setting of this screen either carries a default or fails
+	 * loudly; this one has to fail QUIETLY-PROOF. An empty answer is what lets
+	 * the connection test and the invoice download refuse to build a path,
+	 * instead of falling back to whichever company the credential belongs to -
+	 * which would issue against the wrong tax identifier and answer 200 doing
+	 * it.
+	 *
+	 * @return void
+	 */
+	public function test_the_company_identifier_accessor_has_no_default(): void {
+		$this->assertSame( '0192f4c3-1111-7a1e-9b6d-2c4f8a0b1d3e', SettingsPage::company_id() );
+
+		$this->options[ Constants::OPTION_COMPANY_ID ] = '   ';
+
+		$this->assertSame(
+			'',
+			SettingsPage::company_id(),
+			'A field holding nothing but spaces is a field the merchant left empty, and it has to read as empty here rather than as a company whose identifier is whitespace.'
+		);
+
+		unset( $this->options[ Constants::OPTION_COMPANY_ID ] );
+
+		$this->assertSame(
+			'',
+			SettingsPage::company_id(),
+			'An installation that updates into this version has never written the option. It is not configured, and there is no company this plugin may assume on its behalf.'
+		);
 	}
 
 	/**
