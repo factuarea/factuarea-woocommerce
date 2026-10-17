@@ -4,7 +4,7 @@ Tags: woocommerce, invoicing, invoices, spain, verifactu
 Requires at least: 6.5
 Tested up to: 7.1
 Requires PHP: 8.1
-Stable tag: 0.1.0
+Stable tag: 0.2.0
 License: GPLv2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
 WC requires at least: 8.9
@@ -150,7 +150,7 @@ what you pay for.
 
 == Changelog ==
 
-= Unreleased =
+= 0.2.0 =
 * **Breaking: the settings screen has a new required field, Company identifier.**
 Every Factuarea address this plugin calls now carries the company in its path, so
 the plugin cannot reach the service until the field holds the UUID of your company
@@ -168,7 +168,7 @@ compatibility declared.
 
 == Upgrade Notice ==
 
-= Unreleased =
+= 0.2.0 =
 Open WooCommerce > Settings > Factuarea and fill in the new Company identifier
 field with your Factuarea company UUID. Every address the plugin calls now carries
 the company, so until it is set the connection test reports the configuration as
