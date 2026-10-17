@@ -256,7 +256,7 @@ final class WordPressHttpClientTest extends TestCase {
 	public function test_the_read_side_reports_through_the_same_shape(): void {
 		$this->double_request( 'wp_remote_get', $this->wp_response( 401, array(), '{"code":"unauthenticated"}' ) );
 
-		$response = $this->client->get( 'https://app.example.test/v1/stores/7', array( 'Authorization' => 'Bearer x' ) );
+		$response = $this->client->get( 'https://app.example.test/v1/companies/9f2c1d40-0000-4000-8000-0000000000aa/stores/7', array( 'Authorization' => 'Bearer x' ) );
 
 		$this->assertInstanceOf( HttpResponse::class, $response );
 		$this->assertSame( 401, $response->status_code );
@@ -271,7 +271,7 @@ final class WordPressHttpClientTest extends TestCase {
 	public function test_a_read_that_never_completes_reports_rather_than_throws(): void {
 		$this->double_request( 'wp_remote_get', new WP_Error( 'http_request_failed', 'Connection refused' ) );
 
-		$response = $this->client->get( 'https://app.example.test/v1/stores/7', array() );
+		$response = $this->client->get( 'https://app.example.test/v1/companies/9f2c1d40-0000-4000-8000-0000000000aa/stores/7', array() );
 
 		$this->assertTrue( $response->is_transport_failure() );
 		$this->assertSame( 'Connection refused', $response->transport_error );
@@ -309,7 +309,7 @@ final class WordPressHttpClientTest extends TestCase {
 	public function test_a_read_is_bounded_and_follows_no_redirect_either(): void {
 		$this->double_request( 'wp_remote_get', $this->wp_response( 200 ) );
 
-		$this->client->get( 'https://app.example.test/v1/stores/7', array() );
+		$this->client->get( 'https://app.example.test/v1/companies/9f2c1d40-0000-4000-8000-0000000000aa/stores/7', array() );
 
 		$this->assertSame( WordPressHttpClient::REQUEST_TIMEOUT_SECONDS, $this->captured_arguments['timeout'] );
 		$this->assertSame( 0, $this->captured_arguments['redirection'] );
@@ -409,7 +409,7 @@ final class WordPressHttpClientTest extends TestCase {
 	public function test_a_read_carries_no_body(): void {
 		$this->double_request( 'wp_remote_get', $this->wp_response( 200 ) );
 
-		$this->client->get( 'https://app.example.test/v1/stores/7', array() );
+		$this->client->get( 'https://app.example.test/v1/companies/9f2c1d40-0000-4000-8000-0000000000aa/stores/7', array() );
 
 		$this->assertArrayNotHasKey( 'body', $this->captured_arguments );
 		$this->assertArrayNotHasKey( 'data_format', $this->captured_arguments );

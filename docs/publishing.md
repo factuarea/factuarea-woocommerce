@@ -152,6 +152,50 @@ The directory picks the change up within about fifteen minutes.
 - Download the ZIP the directory serves and unzip it. It has to be the artefact you built, not trunk plus stray files.
 - Install that downloaded ZIP on a clean WordPress with WooCommerce at the **minimum** supported version and walk one paid order end to end.
 
+### 4.5 Releases that carry a breaking change of the Factuarea API
+
+Some versions of this plugin exist because the API moved, not because the plugin
+gained anything. They are the ones where the order of the steps above stops being a
+formality, and there are two rules for them.
+
+**The version in the directory is the one every shop is running.** A route this
+plugin builds and the receiver no longer serves is a broken shop from the moment the
+receiver changes until the moment the merchant updates — and merchants update when
+they notice, which for a quiet shop is weeks. So the window between the two is not
+"a release that is late"; it is the number of days shops are broken. Write the window
+down in the pull request that makes the change, with both ends named: what the
+receiver changed, and what the merchant has to do besides updating.
+
+**A version that needs a new setting is not a silent update.** The company
+identifier is the first of those: it has no default and the plugin cannot invent one,
+so an installation that updates without filling it in reports an incomplete
+configuration on the connection test and stops serving invoice downloads. That is
+the designed outcome — the alternative is reading against whichever company the
+credential happens to belong to, which answers 200 while invoicing under the wrong
+tax ID. It still has to be said in the changelog entry, in the upgrade notice and in
+the answer the merchant gets, all three, because a merchant who reads none of them
+finds out from a buyer.
+
+#### Coordinating with work that has not merged yet
+
+This repository is worked on by more than one line of work at a time, and they do not
+merge in a fixed order. The branch that moves the plugin onto the company segment is
+one of them, and it is ready rather than released.
+
+The rule, and it is the only one that keeps concurrent branches from being quietly
+lost:
+
+- **A branch does not publish.** Publishing is section 3 and section 4.3 of this file,
+  both manual, both performed by a maintainer who has decided to. A branch is ready,
+  not released; `Stable tag` is not touched by work that is not being uploaded.
+- **Whichever merges second rebases or regenerates against the first.** Concurrent
+  lines of work touch the same files — `Contract\Constants.php` above all — and a
+  merge that resolves by taking one side drops the other's work without anything
+  going red.
+- **One release carries both, or the first to merge releases and the second follows.**
+  What must not happen is a release built from a branch that silently lost half of the
+  other, because the evidence of the loss is a green pipeline.
+
 ## 5. Rolling back a bad release
 
 You cannot delete a version. What you can do:

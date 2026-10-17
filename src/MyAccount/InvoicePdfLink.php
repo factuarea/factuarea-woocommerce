@@ -378,6 +378,16 @@ final class InvoicePdfLink {
 	 * this plugin does not use. So the bytes are relayed, and the headers this
 	 * shop sends with them are its own.
 	 *
+	 * TWO SETTINGS ARE REQUIRED BEFORE A REQUEST IS MADE, not one. The route
+	 * now carries the identifier of the company the invoice belongs to, so a
+	 * shop with a key but no configured company has nothing to ask with: the
+	 * read is answered as unavailable WITHOUT going out, exactly as it already
+	 * was for a missing key. It is never made against a company guessed from
+	 * the credential - that would hand the buyer somebody else's document if
+	 * the key ever reached more than one company, and it would do it with a
+	 * 200. The merchant's own diagnosis of this is the connection test, which
+	 * names the field; the buyer is told nothing about the shop's settings.
+	 *
 	 * The content type of the answer is checked rather than trusted, and the
 	 * reason is a specific 200 that is not a document: a captive portal, a
 	 * corporate proxy or a security appliance in front of the shop answers a
@@ -399,8 +409,18 @@ final class InvoicePdfLink {
 			return $this->unavailable();
 		}
 
+		$company_id = SettingsPage::company_id();
+
+		if ( '' === $company_id ) {
+			return $this->unavailable();
+		}
+
 		$response = $this->client()->get(
-			SettingsPage::api_base_url() . sprintf( Constants::INVOICE_PDF_PATH, rawurlencode( $invoice_id ) ),
+			SettingsPage::api_base_url() . sprintf(
+				Constants::INVOICE_PDF_PATH,
+				rawurlencode( $company_id ),
+				rawurlencode( $invoice_id )
+			),
 			array(
 				'Authorization' => 'Bearer ' . $api_key,
 				'Accept'        => self::PDF_CONTENT_TYPE,

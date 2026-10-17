@@ -1,6 +1,6 @@
 {
   "name": "factuarea-for-woocommerce-e2e",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
   "description": "End-to-end harness for the Factuarea for WooCommerce plugin. Nothing here is shipped: the published artefact is PHP only.",
   "license": "GPL-2.0-or-later",

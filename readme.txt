@@ -4,7 +4,7 @@ Tags: woocommerce, invoicing, invoices, spain, verifactu
 Requires at least: 6.5
 Tested up to: 7.1
 Requires PHP: 8.1
-Stable tag: 0.1.0
+Stable tag: 0.2.0
 License: GPLv2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
 WC requires at least: 8.9
@@ -73,8 +73,8 @@ This plugin talks to one external service, Factuarea, and only to the address th
 merchant configures in its settings:
 
 * **Order delivery.** When a payment completes, a status changes or a refund is recorded, the plugin sends that order to Factuarea. What travels is the order as the WooCommerce REST API represents it: buyer billing details including the tax ID, line items, totals, taxes, and payment metadata. This is the purpose of the plugin.
-* **Connection test.** When the merchant presses it, the plugin reads the configured store from the Factuarea API to check the credentials. No shop data is sent.
-* **Invoice download.** When Factuarea has told the plugin which invoice belongs to an order, and only then, the plugin fetches that invoice PDF on the buyer's behalf. The API key never reaches the buyer's browser.
+* **Connection test.** When the merchant presses it, the plugin reads the configured store of the configured company from the Factuarea API to check the credentials. No shop data is sent.
+* **Invoice download.** When Factuarea has told the plugin which invoice belongs to an order, and only then, the plugin fetches that invoice PDF of the configured company on the buyer's behalf. The API key never reaches the buyer's browser.
 
 Nothing is sent anywhere until the merchant configures an address and a key and
 switches delivery on. Factuarea's terms and privacy policy: https://factuarea.com
@@ -82,9 +82,9 @@ switches delivery on. Factuarea's terms and privacy policy: https://factuarea.co
 == Installation ==
 
 1. Install and activate the plugin.
-2. In Factuarea, register this shop as a store and copy its store identifier. Registering a store and issuing an API key are done from the Factuarea app, not from here.
+2. In Factuarea, register this shop as a store and copy its store identifier. Copy the identifier of the company this shop invoices for as well: it is a second UUID and a different one, and every read this plugin makes carries it in the address. Registering a store and issuing an API key are done from the Factuarea app, not from here.
 3. In WordPress, go to **WooCommerce > Factuarea**.
-4. Fill in the Factuarea address, the Factuarea API address (leave the default unless Factuarea told you otherwise), the API key and the store identifier, and save.
+4. Fill in the Factuarea address, the Factuarea API address (leave the default unless Factuarea told you otherwise), the API key, the store identifier and the company identifier, and save. Without the company identifier the plugin reports an incomplete configuration rather than guessing which company to read against.
 5. Press **Generate signing secret**. The secret is shown **once**. Copy it and paste it into the WooCommerce connection that backs this store in Factuarea, so both ends sign and verify with the same value (stores under the same connection share it).
 6. Run the connection test. It reports which of the settings is wrong when one is, rather than a plain failure.
 7. Switch **Delivery** on.
@@ -150,9 +150,26 @@ what you pay for.
 
 == Changelog ==
 
+= 0.2.0 =
+* **Breaking: the settings screen has a new required field, Company identifier.**
+Every Factuarea address this plugin calls now carries the company in its path, so
+the plugin cannot reach the service until the field holds the UUID of your company
+(Factuarea shows it in Settings, Companies; it is the company UUID, never a tax ID).
+Until you fill it in, the connection test reports the configuration as incomplete
+and invoice PDF links are not offered on the order screen. Nothing else changes:
+deliveries already queued stay queued and are sent once the field is saved.
+
 = 0.1.0 =
 * First release. Tax ID field in the block and classic checkouts, order and refund
 delivery with a signing secret of the shop's own, outbox with idempotency and
 backoff, rejection classification driven by the ingestion contract, settings screen
 with a connection test, stalled-outbox notice, and High-Performance Order Storage
 compatibility declared.
+
+== Upgrade Notice ==
+
+= 0.2.0 =
+Open WooCommerce > Settings > Factuarea and fill in the new Company identifier
+field with your Factuarea company UUID. Every address the plugin calls now carries
+the company, so until it is set the connection test reports the configuration as
+incomplete and no invoice PDF link is offered.

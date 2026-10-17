@@ -82,6 +82,14 @@ final class InvoicePdfLinkTest extends TestCase {
 	private const INVOICE_ID = '0f4d4d0b-6c7b-4a35-9e2e-6a1b0a3d1c77';
 
 	/**
+	 * Stored company identifier, the segment every company-scoped route of the
+	 * v1 carries. Deliberately unlike the invoice identifier: a path that
+	 * repeated one of them twice would pass against a fixture that used the
+	 * same value for both.
+	 */
+	private const COMPANY_ID = '0192f4c3-1111-7a1e-9b6d-2c4f8a0b1d3e';
+
+	/**
 	 * Identifier of the order of most cases.
 	 */
 	private const ORDER_ID = 501;
@@ -182,6 +190,7 @@ final class InvoicePdfLinkTest extends TestCase {
 			Constants::OPTION_BASE_URL     => self::DELIVERY_BASE_URL,
 			Constants::OPTION_API_BASE_URL => self::API_BASE_URL,
 			Constants::OPTION_API_KEY      => self::STORED_API_KEY,
+			Constants::OPTION_COMPANY_ID   => self::COMPANY_ID,
 		);
 
 		$this->orders              = array();
@@ -451,8 +460,13 @@ final class InvoicePdfLinkTest extends TestCase {
 
 		$this->assertSame( 1, $this->requests_made );
 		$this->assertSame(
-			self::API_BASE_URL . '/v1/invoices/' . self::INVOICE_ID . '/pdf',
+			self::API_BASE_URL . '/v1/companies/' . self::COMPANY_ID . '/invoices/' . self::INVOICE_ID . '/pdf',
 			$this->requested_url
+		);
+		$this->assertStringNotContainsString(
+			'/v1/invoices/',
+			$this->requested_url,
+			'The flat form of this route no longer exists, so its absence is asserted rather than assumed: a constant that lost the company segment would otherwise show up as buyers being told the document is unavailable.'
 		);
 		$this->assertStringNotContainsString(
 			self::DELIVERY_BASE_URL,
@@ -480,10 +494,43 @@ final class InvoicePdfLinkTest extends TestCase {
 		$this->resolve( $this->order( self::BUYER_ID, 'a b/../c' ) );
 
 		$this->assertSame(
-			self::API_BASE_URL . '/v1/invoices/a%20b%2F..%2Fc/pdf',
+			self::API_BASE_URL . '/v1/companies/' . self::COMPANY_ID . '/invoices/a%20b%2F..%2Fc/pdf',
 			$this->requested_url,
 			'An identifier pasted raw would let a slash inside it address another route entirely.'
 		);
+	}
+
+	/**
+	 * A shop with no company configured downloads nothing, and asks nobody.
+	 *
+	 * The same rule the missing key already answered to, for the setting the
+	 * company segment added. It matters more than the key does: a missing key
+	 * produces a request that is refused, while a missing company would produce
+	 * a path the receiver does not serve - and the version of this plugin that
+	 * ran before the segment existed would have had that same read answered
+	 * against whichever company the credential belonged to. Guessing is the one
+	 * outcome forbidden here, so the absence is answered as unavailable without
+	 * anything going out.
+	 *
+	 * @return void
+	 */
+	public function test_an_unconfigured_company_is_answered_without_a_request(): void {
+		$this->options[ Constants::OPTION_COMPANY_ID ] = '';
+
+		$result = $this->resolve( $this->order( self::BUYER_ID, self::INVOICE_ID ) );
+
+		$this->assertSame( InvoicePdfLink::STATUS_UNAVAILABLE, $result['status'] );
+		$this->assertSame(
+			0,
+			$this->requests_made,
+			'Without a company there is no path to build. Building one with an empty segment would fall back to a route the receiver retired, and sending it would only tell the receiver about a misconfigured shop.'
+		);
+		$this->assertSame(
+			'',
+			$this->requested_url,
+			'No address is constructed at all: the prohibition is on building the path, not only on sending it.'
+		);
+		$this->assertNull( $result['filename'] );
 	}
 
 	/**

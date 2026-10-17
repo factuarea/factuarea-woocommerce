@@ -49,6 +49,13 @@ final class ConnectionTesterTest extends TestCase {
 	private const STORE_ID = '0192f4c3-6f2b-7a1e-9b6d-2c4f8a0b1d3e';
 
 	/**
+	 * Stored company identifier. Deliberately DIFFERENT from the store one: the
+	 * two are separate settings and a path that repeated either of them twice
+	 * would pass a test whose fixture used one value for both.
+	 */
+	private const COMPANY_ID = '0192f4c3-1111-7a1e-9b6d-2c4f8a0b1d3e';
+
+	/**
 	 * Address the v1 reads are made against in these tests.
 	 */
 	private const API_BASE_URL = 'https://api.factuarea.example';
@@ -117,6 +124,7 @@ final class ConnectionTesterTest extends TestCase {
 			Constants::OPTION_API_BASE_URL => self::API_BASE_URL,
 			Constants::OPTION_API_KEY      => self::STORED_API_KEY,
 			Constants::OPTION_STORE_ID     => self::STORE_ID,
+			Constants::OPTION_COMPANY_ID   => self::COMPANY_ID,
 		);
 
 		$this->requested_url       = '';
@@ -288,6 +296,130 @@ final class ConnectionTesterTest extends TestCase {
 	}
 
 	/**
+	 * A company the key cannot reach is told apart from a store it cannot see,
+	 * and the two send the merchant to two different fields.
+	 *
+	 * Both are a 404 carrying one of the receiver's error documents, so status
+	 * alone cannot separate them and a test that only asserted the status would
+	 * pass against a class that answered "your store does not exist" to a
+	 * perfectly good store identifier. What separates them is the stable code,
+	 * and the assertion that matters is the one comparing the two next steps:
+	 * two outcomes that read the same are one outcome to the merchant.
+	 *
+	 * @return void
+	 */
+	public function test_a_company_the_key_cannot_reach_is_reported_apart_from_the_store(): void {
+		$this->answer_with( 404, $this->receiver_error( 'profile_not_found', 'La empresa indicada no existe o no esta en el ambito de tu credencial.', 'company' ) );
+
+		$company = ( new ConnectionTester() )->test();
+
+		$this->assertFalse( $company['ok'] );
+		$this->assertSame( ConnectionTester::DIAGNOSTIC_COMPANY_NOT_IN_ACCOUNT, $company['diagnostic'] );
+		$this->assertStringContainsString( 'company identifier', $company['next_step'] );
+
+		$this->answer_with( 404, $this->receiver_error( 'store_not_found', 'La tienda no existe en tu empresa.' ) );
+
+		$store = ( new ConnectionTester() )->test();
+
+		$this->assertSame( ConnectionTester::DIAGNOSTIC_STORE_NOT_IN_ACCOUNT, $store['diagnostic'] );
+		$this->assertNotSame(
+			$company['diagnostic'],
+			$store['diagnostic'],
+			'A company the key cannot reach and a store the account does not hold are fixed in different fields. Collapsing them sends a merchant whose company identifier is wrong to re-copy a store identifier that was already right.'
+		);
+		$this->assertNotSame( $company['message'], $store['message'] );
+		$this->assertNotSame( $company['next_step'], $store['next_step'] );
+	}
+
+	/**
+	 * A company that is deactivated is told apart from a key without the
+	 * permission, and the two send the merchant to two different places.
+	 *
+	 * Both are a 403 carrying one of the receiver's error documents, so status
+	 * alone cannot separate them: before the company segment existed this
+	 * refusal was not even reachable from the plugin, and answering it with
+	 * "your key is not allowed to read stores" sends somebody whose key is
+	 * perfectly fine to review its permissions.
+	 *
+	 * @return void
+	 */
+	public function test_an_inactive_company_is_reported_apart_from_a_key_without_the_permission(): void {
+		$this->answer_with( 403, $this->receiver_error( 'company_inactive', 'La empresa indicada no esta activa.', 'company' ) );
+
+		$inactive = ( new ConnectionTester() )->test();
+
+		$this->assertFalse( $inactive['ok'] );
+		$this->assertSame( ConnectionTester::DIAGNOSTIC_COMPANY_INACTIVE, $inactive['diagnostic'] );
+		$this->assertStringContainsString( 'Reactivate the company', $inactive['next_step'] );
+
+		$this->answer_with( 403, $this->receiver_error( 'insufficient_scope', "Requiere el scope 'stores:read'." ) );
+
+		$permission = ( new ConnectionTester() )->test();
+
+		$this->assertSame( ConnectionTester::DIAGNOSTIC_INSUFFICIENT_PERMISSION, $permission['diagnostic'] );
+		$this->assertNotSame(
+			$inactive['diagnostic'],
+			$permission['diagnostic'],
+			'A deactivated company and a key without the permission are fixed in two different places. Collapsing them sends a merchant whose key is right to review its scopes while the company stays off.'
+		);
+		$this->assertNotSame( $inactive['message'], $permission['message'] );
+		$this->assertNotSame( $inactive['next_step'], $permission['next_step'] );
+	}
+
+	/**
+	 * The refusal is recognised by the parameter it names too, not only by its
+	 * code.
+	 *
+	 * Two readers of the same answer rather than one, because the code is the
+	 * receiver's contract and the parameter name is the field it points at: an
+	 * answer carrying either is unambiguous, and requiring both would turn a
+	 * wording change on the far side into a diagnostic the merchant cannot act
+	 * on.
+	 *
+	 * @return void
+	 */
+	public function test_a_company_refusal_that_only_names_the_parameter_is_still_recognised(): void {
+		$this->answer_with( 404, $this->receiver_error( 'resource_missing', 'No encontrado.', 'company' ) );
+
+		$result = ( new ConnectionTester() )->test();
+
+		$this->assertSame( ConnectionTester::DIAGNOSTIC_COMPANY_NOT_IN_ACCOUNT, $result['diagnostic'] );
+	}
+
+	/**
+	 * Without a company identifier nothing is requested, and the message names
+	 * the field that is empty.
+	 *
+	 * This is the one outcome the whole company segment exists to force. Before
+	 * the segment, a read with no company in it was a valid request answered
+	 * against whichever company the credential belonged to; now there is no
+	 * such path, and the class has to refuse to build one rather than build it
+	 * with an empty segment - which would collapse to the flat form the
+	 * receiver no longer serves and be reported as a missing store.
+	 *
+	 * @return void
+	 */
+	public function test_nothing_is_requested_without_a_company_identifier(): void {
+		$this->options[ Constants::OPTION_COMPANY_ID ] = '';
+		$this->answer_with( 200, array( 'id' => self::STORE_ID ) );
+
+		$result = ( new ConnectionTester() )->test();
+
+		$this->assertSame( ConnectionTester::DIAGNOSTIC_NOT_CONFIGURED, $result['diagnostic'] );
+		$this->assertStringContainsString( 'the company identifier', $result['message'] );
+		$this->assertSame(
+			0,
+			$this->requests_made,
+			'A company segment that is empty is not a request to make: it builds a path the receiver does not serve, and the answer would be reported as a store that does not exist.'
+		);
+		$this->assertSame(
+			'',
+			$this->requested_url,
+			'No address is built at all when the company is missing. The prohibition is on CONSTRUCTING the path, not only on sending it.'
+		);
+	}
+
+	/**
 	 * Nothing answering at all is a fourth diagnostic, and it names the address
 	 * rather than a credential.
 	 *
@@ -404,9 +536,14 @@ final class ConnectionTesterTest extends TestCase {
 		( new ConnectionTester() )->test();
 
 		$this->assertSame(
-			self::API_BASE_URL . '/v1/stores/' . self::STORE_ID,
+			self::API_BASE_URL . '/v1/companies/' . self::COMPANY_ID . '/stores/' . self::STORE_ID,
 			$this->requested_url,
-			'The v1 is served from its own host. A read aimed at the delivery address answers 404 on every well-configured shop, which is the failure the second address setting exists to remove.'
+			'The v1 is served from its own host, and every company-scoped route of it carries the company segment before the resource. A read aimed at the delivery address answers 404 on every well-configured shop, and one aimed at the flat form answers 404 on all of them.'
+		);
+		$this->assertStringNotContainsString(
+			'/v1/stores/',
+			$this->requested_url,
+			'The flat form of this route no longer exists. Asserting its ABSENCE is what makes a regression of the constant fail here instead of turning up as a connection test that says the store is not in the account.'
 		);
 		$this->assertStringNotContainsString( self::DELIVERY_BASE_URL, $this->requested_url );
 
@@ -437,15 +574,15 @@ final class ConnectionTesterTest extends TestCase {
 
 		$this->assertSame( ConnectionTester::DIAGNOSTIC_OK, $result['diagnostic'] );
 		$this->assertSame(
-			Constants::DEFAULT_API_BASE_URL . '/v1/stores/' . self::STORE_ID,
+			Constants::DEFAULT_API_BASE_URL . '/v1/companies/' . self::COMPANY_ID . '/stores/' . self::STORE_ID,
 			$this->requested_url,
-			'The API address is the one setting a merchant of the hosted product never has to know about, so an empty one is the default and not a missing setting.'
+			'The API address is the one setting a merchant of the hosted product never has to know about, so an empty one is the default and not a missing setting. The company segment is not one of those: it has no default, because there is no company this plugin may assume.'
 		);
 	}
 
 	/**
-	 * Every outcome carries a diagnostic from the closed catalogue, and the five
-	 * distinguishable failures really are five different values.
+	 * Every outcome carries a diagnostic from the closed catalogue, and each
+	 * distinguishable failure really is a different value.
 	 *
 	 * @return void
 	 */
@@ -520,6 +657,12 @@ final class ConnectionTesterTest extends TestCase {
 		$this->answer_with( 404, $this->receiver_error( 'store_not_found', 'No existe.' ) );
 		$outcomes['a store outside the account'] = ( new ConnectionTester() )->test();
 
+		$this->answer_with( 404, $this->receiver_error( 'profile_not_found', 'No existe.', 'company' ) );
+		$outcomes['a company the key cannot reach'] = ( new ConnectionTester() )->test();
+
+		$this->answer_with( 403, $this->receiver_error( 'company_inactive', 'No esta activa.', 'company' ) );
+		$outcomes['a company that is not active'] = ( new ConnectionTester() )->test();
+
 		$this->answer_with_transport_error( 'Operation timed out after 15001 milliseconds' );
 		$outcomes['an address that does not answer'] = ( new ConnectionTester() )->test();
 
@@ -539,18 +682,26 @@ final class ConnectionTesterTest extends TestCase {
 	 *
 	 * @param string $code    Stable error code.
 	 * @param string $message Message as the receiver writes it.
+	 * @param string $param   Parameter the receiver points at, when it points at
+	 *                        one. Empty means the key is absent from the
+	 *                        document, which is what the receiver does when the
+	 *                        refusal is not about one parameter in particular.
 	 * @return array<string, mixed>
 	 */
-	private function receiver_error( string $code, string $message ): array {
-		return array(
-			'error' => array(
-				'type'       => 'api_error',
-				'code'       => $code,
-				'message'    => $message,
-				'doc_url'    => 'https://docs.factuarea.example/guides/errors#' . $code,
-				'request_id' => 'req_0123456789',
-			),
+	private function receiver_error( string $code, string $message, string $param = '' ): array {
+		$error = array(
+			'type'       => 'api_error',
+			'code'       => $code,
+			'message'    => $message,
+			'doc_url'    => 'https://docs.factuarea.example/guides/errors#' . $code,
+			'request_id' => 'req_0123456789',
 		);
+
+		if ( '' !== $param ) {
+			$error['param'] = $param;
+		}
+
+		return array( 'error' => $error );
 	}
 
 	/**
